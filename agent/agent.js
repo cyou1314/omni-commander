@@ -1,9 +1,15 @@
 #!/usr/bin/env node
 "use strict";
-/* Can agent — omni-commander V2, Steps 2-3.
- * Runs on the owner's Mac. Dials OUT to the Can gateway (no inbound
+/* Can agent — omni-commander V2.
+ * Runs on the owner's computer (macOS or Windows; one codebase, platform
+ * branches where the OS differs). Dials OUT to the Can gateway (no inbound
  * ports): heartbeat every 20s, long-polls for tool jobs, executes them
  * locally, posts results back. Node built-ins only.
+ * Windows notes: shell is cmd.exe with its own catastrophic-pattern list;
+ * screenshots convert via PowerShell + System.Drawing (macOS: sips); the
+ * owner-confirmation dialog is WinForms (macOS: AppleScript); the ego
+ * daily-browser layer reports unavailable (ego for Windows is beta);
+ * Cua Driver is spawned as `cua-driver mcp` on both platforms.
  * Tools:
  *   can_status      -> this computer's identity + liveness
  *   can_write_note  -> append a line to write-log.txt in this folder
@@ -33,8 +39,8 @@
  * absolute paths, ".." escapes and symlink escapes are refused.
  * can_run_command has a 30s timeout, capped output, and a blocklist
  * of catastrophic patterns. Step 4 fence (below, before dispatch):
- * sensitive tools need the owner's click on a native Mac dialog,
- * and every call is written to audit.log.
+ * sensitive tools need the owner's click on a native dialog on this
+ * computer, and every call is written to audit.log.
  */
 const fs = require("fs");
 const os = require("os");
@@ -46,14 +52,16 @@ const DIR = __dirname;
 const cfg = JSON.parse(fs.readFileSync(path.join(DIR, "config.json"), "utf8"));
 const GATEWAY = String(cfg.gateway || "").replace(/\/+$/, "");
 const KEY = cfg.agentKey || "";
-const NAME = cfg.name || "Can agent (Mac)";
-const ROOT = cfg.workRoot || "/Users/cyou/commander-work";
+const PLATFORM = process.platform; // "darwin" | "win32" | "linux"
+const IS_WIN = PLATFORM === "win32";
+const NAME = cfg.name || (IS_WIN ? "Can agent (Windows)" : "Can agent (Mac)");
+const ROOT = cfg.workRoot || (IS_WIN ? path.join(os.homedir(), "can-work") : "/Users/cyou/commander-work");
 const REAL_ROOT = fs.existsSync(ROOT) ? fs.realpathSync(ROOT) : ROOT;
 const STARTED = Date.now();
 const LOG = path.join(DIR, "agent.log");
 const STATUS = path.join(DIR, "status.json");
 const WRITELOG = path.join(DIR, "write-log.txt");
-const AGENT_VERSION = "0.9.1";
+const AGENT_VERSION = "0.10.0";
 
 function log(msg) {
   const line = `[${new Date().toISOString()}] ${msg}\n`;
@@ -62,20 +70,31 @@ function log(msg) {
 }
 
 function computerName() {
-  try { return execFileSync("scutil", ["--get", "ComputerName"], { encoding: "utf8" }).trim(); }
-  catch (e) { return os.hostname(); }
+  if (PLATFORM === "darwin") {
+    try { return execFileSync("scutil", ["--get", "ComputerName"], { encoding: "utf8" }).trim(); }
+    catch (e) { /* fall through to hostname */ }
+  }
+  return os.hostname();
 }
-function macosVersion() {
-  try { return execFileSync("sw_vers", ["-productVersion"], { encoding: "utf8" }).trim(); }
-  catch (e) { return os.release(); }
+function osVersion() {
+  if (PLATFORM === "darwin") {
+    try { return execFileSync("sw_vers", ["-productVersion"], { encoding: "utf8" }).trim(); }
+    catch (e) { return os.release(); }
+  }
+  if (IS_WIN) {
+    try { return os.version(); } catch (e) { return os.release(); }
+  }
+  return os.release();
 }
 const COMPUTER = computerName();
-const MACOS = macosVersion();
+const MACOS = osVersion();
+const OS_LABEL = PLATFORM === "darwin" ? `macOS ${MACOS}` : IS_WIN ? MACOS : `${PLATFORM} ${MACOS}`;
 
 function writeStatus(state, extra) {
   const s = Object.assign({
     product: "Can", state, pid: process.pid,
-    computer: COMPUTER, macos: MACOS,
+    computer: COMPUTER, os: OS_LABEL, platform: PLATFORM,
+    ...(PLATFORM === "darwin" ? { macos: MACOS } : {}),
     started_at: new Date(STARTED).toISOString(),
     updated_at: new Date().toISOString(),
   }, extra || {});
@@ -94,8 +113,8 @@ async function api(method, p, body, timeoutMs) {
 
 async function heartbeat() {
   const resp = await api("POST", "/agent/heartbeat", {
-    agent_id: "mac-1", name: NAME, hostname: os.hostname(),
-    os: `macOS ${MACOS}`, version: AGENT_VERSION,
+    agent_id: cfg.agentId || (IS_WIN ? "win-1" : "mac-1"), name: NAME, hostname: os.hostname(),
+    os: OS_LABEL, version: AGENT_VERSION,
   }, 10000);
   if (!resp.ok) throw new Error("heartbeat HTTP " + resp.status);
   writeStatus("connected", { last_heartbeat: new Date().toISOString() });
@@ -187,9 +206,34 @@ const BLOCKED = [
   /\bchmod\s+-R\b[^|;&]*\s\//,
 ];
 
+// Windows-only catastrophic patterns (checked additionally on win32).
+const WIN_BLOCKED = [
+  /\bformat\s+[a-z]:/i,
+  /\bdiskpart\b/i,
+  /\bbcdedit\b/i,
+  /\bbootsect\b/i,
+  /\breg\s+(delete|add)\b[^|;&]*(HKLM|HKEY_LOCAL_MACHINE)/i,
+  /\bnet\s+user\b/i,
+  /\bnet\s+localgroup\b/i,
+  /\b(del|erase)\s+[^|;&]*[a-z]:\\(\s|$|\*)/i,
+  /\brd\s+\/s\s+\/q\s+[a-z]:\\/i,
+  /\btakeown\b/i,
+  /\bvssadmin\b[^|;&]*delete/i,
+  /\bwbadmin\b[^|;&]*delete/i,
+  /\bcipher\s+\/w/i,
+  /\bpowershell\b[^|;&]*(-enc\b|encodedcommand|invoke-expression|\biex\b)/i,
+  /\bcertutil\b[^|;&]*(-urlcache|-decode)/i,
+  /\bmshta\b/i,
+];
+
 function blockedByPattern(command) {
   for (const re of BLOCKED) {
     if (re.test(command)) return true;
+  }
+  if (IS_WIN) {
+    for (const re of WIN_BLOCKED) {
+      if (re.test(command)) return true;
+    }
   }
   return false;
 }
@@ -206,10 +250,12 @@ function toolRunCommand(args) {
   }
   return new Promise((resolve) => {
     exec(command, {
-      cwd: ROOT, shell: "/bin/zsh", timeout: 30000, maxBuffer: 1024 * 1024,
-      env: Object.assign({}, process.env, {
-        PATH: "/Users/cyou/node/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin",
-      }),
+      cwd: ROOT, shell: IS_WIN ? "cmd.exe" : "/bin/zsh", timeout: 30000, maxBuffer: 1024 * 1024,
+      env: IS_WIN
+        ? Object.assign({}, process.env)
+        : Object.assign({}, process.env, {
+            PATH: "/Users/cyou/node/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin",
+          }),
     }, (err, stdout, stderr) => {
       const out = String(stdout || ""), errOut = String(stderr || "");
       resolve(JSON.stringify({
@@ -228,7 +274,18 @@ function toolRunCommand(args) {
  * a dedicated Can profile (~/can-agent/browser-profile) — NOT the
  * owner's daily browser and NOT any logged-in profile. Zero-dep:
  * Node's built-in WebSocket speaks to Chrome's debugging socket. */
-const CHROME_BIN = "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome";
+const CHROME_CANDIDATES = IS_WIN
+  ? [
+      "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe",
+      "C:\\Program Files (x86)\\Google\\Chrome\\Application\\chrome.exe",
+      path.join(os.homedir(), "AppData", "Local", "Google", "Chrome", "Application", "chrome.exe"),
+    ]
+  : PLATFORM === "darwin"
+    ? ["/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"]
+    : ["/usr/bin/google-chrome", "/usr/bin/chromium", "/usr/bin/chromium-browser"];
+const CHROME_BIN = cfg.chromePath
+  || CHROME_CANDIDATES.find((p) => { try { return fs.existsSync(p); } catch (e) { return false; } })
+  || CHROME_CANDIDATES[0];
 const BROWSER_PROFILE = path.join(DIR, "browser-profile");
 let browser = null; // { proc, ws, sessionId, seq, pending: Map }
 
@@ -425,7 +482,10 @@ process.on("exit", () => { if (browser) { try { browser.proc.kill(); } catch (e)
  * `ego-browser nodejs` runtime: each call runs a fresh Node script with
  * ego globals (taskSpace, claimTaskSpace, listTaskSpaces, Page API).
  * Scripts print one "CAN_RESULT {json}" line for the agent to parse. */
-const EGO_BIN = "/Users/cyou/.local/bin/ego-browser";
+// ego's Windows build is beta and has no stable install path yet: on
+// Windows the daily-browser layer reports itself unavailable instead of
+// spawning a binary that is not there.
+const EGO_BIN = IS_WIN ? null : "/Users/cyou/.local/bin/ego-browser";
 const EGO_STATE = path.join(DIR, "ego-state.json");
 const EGO_CAN_SPACE = "Can";
 
@@ -440,6 +500,9 @@ function saveEgoState(patch) {
 }
 
 function runEgo(script, timeoutMs) {
+  if (!EGO_BIN) {
+    return Promise.reject(new Error("the ego daily-browser layer is not available on Windows yet"));
+  }
   return new Promise((resolve, reject) => {
     const child = spawn(EGO_BIN, ["nodejs"], { stdio: ["pipe", "pipe", "pipe"] });
     let out = "", err = "";
@@ -593,7 +656,7 @@ async function toolEgoFinish() {
  * browser's window and click its elements -- no plugin anywhere
  * (the extension route was built, verified, then dropped on the
  * owner's decision, 2026-11-05). */
-const CUA_BIN = cfg.cuaPath || "/Users/cyou/.local/bin/cua-driver";
+const CUA_BIN = cfg.cuaPath || (IS_WIN ? "cua-driver" : "/Users/cyou/.local/bin/cua-driver");
 // Unique per agent process: the driver daemon tombstones a session
 // label when the transport that created it dies, so reusing a fixed
 // label across agent restarts ends in "session has ended" /
@@ -925,11 +988,13 @@ async function toolDesktopBatch(args) {
   return JSON.stringify(res);
 }
 
-// Convert a PNG screenshot to JPEG with macOS's built-in sips: same picture,
-// a fraction of the bytes. ChatGPT's conversation UI failed to render the
-// large PNG payloads the engine returns (broken placeholder / dropped image)
-// while the model itself received them fine, so screenshots go out as JPEG.
+// Convert a PNG screenshot to JPEG: same picture, a fraction of the bytes.
+// ChatGPT's conversation UI failed to render the large PNG payloads the
+// engine returns (broken placeholder / dropped image) while the model
+// itself received them fine, so screenshots go out as JPEG. macOS uses its
+// built-in sips; Windows uses PowerShell + System.Drawing (both built in).
 async function pngToJpeg(pngBuffer, maxDim) {
+  if (IS_WIN) return pngToJpegWin(pngBuffer, maxDim);
   const os = require("node:os");
   const path = require("node:path");
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "can-shot-"));
@@ -943,6 +1008,38 @@ async function pngToJpeg(pngBuffer, maxDim) {
       p.stderr.on("data", (d) => { err += d; });
       p.on("error", reject);
       p.on("close", (code) => (code === 0 ? resolve() : reject(new Error("sips failed: " + err.slice(0, 200)))));
+    });
+    return fs.readFileSync(outP);
+  } finally {
+    try { fs.rmSync(dir, { recursive: true, force: true }); } catch {}
+  }
+}
+
+async function pngToJpegWin(pngBuffer, maxDim) {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "can-shot-"));
+  const inP = path.join(dir, "shot.png");
+  const outP = path.join(dir, "shot.jpg");
+  const dim = Math.min(Math.max(Number(maxDim) || 1600, 1), 8192);
+  const ps = [
+    "Add-Type -AssemblyName System.Drawing",
+    `$img = [System.Drawing.Image]::FromFile('${inP.replace(/'/g, "''")}')`,
+    `$scale = [Math]::Min(1.0, ${dim} / [Math]::Max($img.Width, $img.Height))`,
+    "$w = [Math]::Max(1, [int]($img.Width * $scale)); $h = [Math]::Max(1, [int]($img.Height * $scale))",
+    "$bmp = New-Object System.Drawing.Bitmap($w, $h)",
+    "$g = [System.Drawing.Graphics]::FromImage($bmp); $g.DrawImage($img, 0, 0, $w, $h)",
+    "$codec = [System.Drawing.Imaging.ImageCodecInfo]::GetImageEncoders() | Where-Object { $_.MimeType -eq 'image/jpeg' }",
+    "$ep = New-Object System.Drawing.Imaging.EncoderParameters(1); $ep.Param[0] = New-Object System.Drawing.Imaging.EncoderParameter([System.Drawing.Imaging.Encoder]::Quality, 62L)",
+    `$bmp.Save('${outP.replace(/'/g, "''")}', $codec, $ep)`,
+    "$g.Dispose(); $bmp.Dispose(); $img.Dispose()",
+  ].join("; ");
+  try {
+    fs.writeFileSync(inP, pngBuffer);
+    await new Promise((resolve, reject) => {
+      const p = spawn("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", ps], { stdio: ["ignore", "pipe", "pipe"] });
+      let err = "";
+      p.stderr.on("data", (d) => { err += d; });
+      p.on("error", reject);
+      p.on("close", (code) => (code === 0 ? resolve() : reject(new Error("powershell jpeg failed: " + err.slice(0, 200)))));
     });
     return fs.readFileSync(outP);
   } finally {
@@ -1186,6 +1283,7 @@ function argsSummary(tool, args) {
 }
 
 function macConfirm(summary) {
+  if (IS_WIN) return winConfirm(summary);
   return new Promise((resolve) => {
     const script = [
       "on run argv",
@@ -1198,6 +1296,29 @@ function macConfirm(summary) {
         if (err) return resolve(false);
         const out = String(stdout || "");
         resolve(/button returned:\s*允许/.test(out) && !/gave up:\s*true/.test(out));
+      });
+  });
+}
+
+// Windows owner-confirmation dialog (PowerShell + WinForms): same contract
+// as the macOS dialog — 允许 runs it, 拒绝 / close / timeout all fail closed.
+function winConfirm(summary) {
+  return new Promise((resolve) => {
+    const msg = String(summary || "").replace(/'/g, "''").replace(/[\r\n]+/g, " ").slice(0, 600);
+    const ps = [
+      "Add-Type -AssemblyName System.Windows.Forms",
+      "$f = New-Object System.Windows.Forms.Form; $f.Text = 'Can 需要你确认'; $f.Width = 540; $f.Height = 250; $f.StartPosition = 'CenterScreen'; $f.TopMost = $true",
+      `$l = New-Object System.Windows.Forms.Label; $l.Text = '${msg}'; $l.Left = 16; $l.Top = 16; $l.Width = 500; $l.Height = 120; $f.Controls.Add($l)`,
+      "$ok = New-Object System.Windows.Forms.Button; $ok.Text = '允许'; $ok.Left = 320; $ok.Top = 160; $ok.Width = 90; $ok.DialogResult = [System.Windows.Forms.DialogResult]::OK; $f.Controls.Add($ok)",
+      "$no = New-Object System.Windows.Forms.Button; $no.Text = '拒绝'; $no.Left = 420; $no.Top = 160; $no.Width = 90; $no.DialogResult = [System.Windows.Forms.DialogResult]::Cancel; $f.Controls.Add($no)",
+      "$f.AcceptButton = $ok; $f.CancelButton = $no",
+      `$t = New-Object System.Windows.Forms.Timer; $t.Interval = ${DIALOG_TIMEOUT_S * 1000}; $t.Add_Tick({ $f.DialogResult = [System.Windows.Forms.DialogResult]::Cancel; $f.Close() }); $t.Start()`,
+      "if ($f.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) { 'ALLOWED' } else { 'DENIED' }",
+    ].join("; ");
+    execFile("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", ps],
+      { timeout: (DIALOG_TIMEOUT_S + 15) * 1000 }, (err, stdout) => {
+        if (err) return resolve(false);
+        resolve(/\bALLOWED\b/.test(String(stdout || "")));
       });
   });
 }
@@ -1368,7 +1489,7 @@ async function pollOnce() {
 }
 
 async function main() {
-  log(`Can agent ${AGENT_VERSION} starting; gateway=${GATEWAY} computer=${COMPUTER} macos=${MACOS} workRoot=${ROOT}`);
+  log(`Can agent ${AGENT_VERSION} starting; gateway=${GATEWAY} computer=${COMPUTER} os=${OS_LABEL} workRoot=${ROOT}`);
   writeStatus("starting");
   // Heartbeat runs on its own timer so long jobs (ego) cannot starve it.
   setInterval(() => { heartbeat().catch(() => {}); }, 20000);

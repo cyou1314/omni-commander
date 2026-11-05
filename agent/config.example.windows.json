@@ -1,0 +1,1 @@
+{"agentId":"win-1","agentKey":"PUT_THE_AGENT_KEY_HERE","cuaPath":"cua-driver","fence":{"confirmDesktop":false,"confirmEgo":false,"confirmRun":false,"dialogTimeoutS":60,"trustWindowMin":0},"gateway":"https://unpaid-reiterate-sacred.ngrok-free.dev","name":"Can agent (Windows)","workRoot":"C:\\Users\\YOURNAME\\can-work"}
