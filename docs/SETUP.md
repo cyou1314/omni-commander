@@ -227,6 +227,23 @@ every step is verified.
 **Accept:** end state matches what you asked for, and the task log shows which
 layer did what.
 
+> **Verified on the first test machine (macOS + Codex, 2026-11-05):**
+> the example was adapted to harvested data instead of a downloaded file
+> (same hand-offs, every layer participates): (1) ego, in a fresh Space
+> under the daily profile, read the user's own X profile from a snapshot
+> — display name, handle, following and follower counts — then closed
+> the Space without touching daily tabs; (2) Desktop Commander wrote the
+> four values to a file in the allowlisted folder, read them back,
+> renamed the file to `step6-x-profile-done.txt`, and read them back
+> again after the rename; (3) Cua Driver created a note in Notes
+> entirely in the background — title `omni step6`, body carrying the
+> follower count — and read title and body back from the accessibility
+> tree. The values were identical at every hand-off (final file
+> independently re-read: display name `c you`, `@cyou24256`, following
+> 24, followers 0), the brain's report named each layer's work, and the
+> whole run reused the Step 5 session — no new session needed. By design
+> the run leaves artefacts: the `-done` file and the test note in Notes.
+
 ## Step 7 — Solidify it into a script
 
 Save the Step 6 flow into `workflows/` (ego batch JS and/or shell), following
