@@ -56,7 +56,7 @@ from mcp.server.auth.settings import (
 from mcp.server.fastmcp import FastMCP
 from mcp.server.transport_security import TransportSecuritySettings
 from mcp.shared.auth import OAuthClientInformationFull, OAuthToken
-from mcp.types import ImageContent, TextContent, ToolAnnotations
+from mcp.types import CallToolResult, ImageContent, TextContent, ToolAnnotations
 from pydantic import AnyHttpUrl
 from starlette.requests import Request
 from starlette.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse, Response
@@ -340,6 +340,57 @@ async def serve_shot(request: Request):
     return Response(content=img_bytes, media_type=mime, headers={"Cache-Control": "no-store"})
 
 
+# --- Screenshot widget (Apps SDK) ----------------------------------------------
+# Inline images in tool results are not rendered by ChatGPT's UI, so the
+# screenshot tool also carries an Apps SDK output template: a tiny component
+# that draws the screenshot inside the conversation. The component reads the
+# viewing link from structuredContent and falls back to a data URI carried in
+# the tool result _meta (widget-only channel, never shown to the model).
+SCREENSHOT_WIDGET_URI = "ui://widget/can-screenshot.html"
+_PUBLIC_ORIGIN = PUBLIC_URL.split("/")[0] + "//" + PUBLIC_URL.split("/")[2]
+
+WIDGET_HTML = """<!doctype html>
+<html><head><meta charset="utf-8"><style>
+body{margin:0;font-family:-apple-system,system-ui,"Segoe UI",sans-serif;background:transparent}
+figure{margin:0}
+img{width:100%;height:auto;display:block;border-radius:8px;background:#f2f2f2}
+figcaption{padding:8px 2px 2px;font-size:13px;color:#6b7280}
+a{color:#2563eb;text-decoration:none}
+</style></head>
+<body>
+<figure><img id="shot" alt="Screenshot of the owner's computer screen"><figcaption id="cap">Loading screenshot...</figcaption></figure>
+<script>
+function render(){
+  var o=(window.openai&&window.openai.toolOutput)||{};
+  var md=(window.openai&&window.openai.toolResponseMetadata)||{};
+  var img=document.getElementById('shot');var cap=document.getElementById('cap');
+  var url=o.image_url||'';var data=md['can/image_data']||'';
+  img.onerror=function(){ if(data && img.src!==data){ img.src=data; } };
+  if(url){ img.src=url; } else if(data){ img.src=data; }
+  var dims=(o.width&&o.height)?(o.width+'\\u00d7'+o.height):'';
+  cap.innerHTML='Screenshot of the owner\\'s screen'+(dims?' \\u00b7 '+dims:'')+(url?' \\u00b7 <a href="'+url+'" target="_blank" rel="noopener">Open full image</a>':'');
+}
+window.addEventListener('openai:set_globals',render);
+render();
+</script>
+</body></html>"""
+
+
+@mcp.resource(
+    SCREENSHOT_WIDGET_URI,
+    name="can-screenshot-widget",
+    description="Inline screenshot viewer for Can.",
+    mime_type="text/html+skybridge",
+    meta={
+        "openai/widgetDescription": "Shows a live screenshot of the owner's computer screen.",
+        "openai/widgetPrefersBorder": True,
+        "openai/widgetCSP": {"resource_domains": [_PUBLIC_ORIGIN], "connect_domains": [_PUBLIC_ORIGIN]},
+    },
+)
+def screenshot_widget() -> str:
+    return WIDGET_HTML
+
+
 async def relay_tool(name: str, arguments: dict, timeout: float = 30.0) -> str:
     """Shared tool body: offline pre-check, relay to the agent, timeout."""
     log_line(TOOL_LOG, f"{time.strftime('%H:%M:%S')} CALL {name} args={arguments!r}")
@@ -427,17 +478,21 @@ async def can_desktop_key(key: str, ref: str = "", pid: int = 0, window_id: int 
     return await relay_tool("can_desktop_key", {"key": key, "ref": ref, "pid": pid, "window_id": window_id}, timeout=115)
 
 
-@mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False, idempotentHint=True))
-async def can_desktop_screenshot(max_dim: int = 1600) -> list:
+@mcp.tool(
+    annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False, idempotentHint=True),
+    meta={"openai/outputTemplate": SCREENSHOT_WIDGET_URI},
+    structured_output=False,
+)
+async def can_desktop_screenshot(max_dim: int = 1600) -> CallToolResult:
     """Take a REAL screenshot of the owner's computer screen (the whole display) and return it as an image visible in this conversation. Use it whenever the user asks to SEE the screen, or when a structural snapshot is not enough to know what is on it. max_dim caps the image's long edge in pixels (default 1600). Read-only: nothing on the computer is touched."""
     raw = await relay_tool("can_desktop_screenshot", {"max_dim": max_dim}, timeout=60)
     try:
         data = json.loads(raw)
     except Exception:
-        return [TextContent(type="text", text=raw)]
+        return CallToolResult(content=[TextContent(type="text", text=raw)])
     b64 = data.get("screenshot_png_b64") if isinstance(data, dict) else None
     if not b64:
-        return [TextContent(type="text", text=raw)]
+        return CallToolResult(content=[TextContent(type="text", text=raw)])
     mime = data.get("mime") or "image/png"
     link = ""
     try:
@@ -451,14 +506,24 @@ async def can_desktop_screenshot(max_dim: int = 1600) -> list:
     )
     if link:
         summary += (
-            f" The attached image may not render in this chat UI; to let the user "
-            f"actually SEE the screenshot, include this viewing link in your reply "
+            f" The screenshot is shown to the user inline by the Can viewer "
+            f"component. If it does not appear, give the user this viewing link "
             f"exactly as written (valid 10 minutes): {link}"
         )
-    return [
-        TextContent(type="text", text=summary),
-        ImageContent(type="image", data=b64, mimeType=mime),
-    ]
+    return CallToolResult(
+        content=[
+            TextContent(type="text", text=summary),
+            ImageContent(type="image", data=b64, mimeType=mime),
+        ],
+        structuredContent={
+            "image_url": link,
+            "mime": mime,
+            "width": data.get("screenshot_width"),
+            "height": data.get("screenshot_height"),
+            "expires_in_s": SHOT_TTL,
+        },
+        _meta={"can/image_data": f"data:{mime};base64,{b64}"},
+    )
 
 
 @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False, idempotentHint=True))
