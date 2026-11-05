@@ -1,14 +1,19 @@
 #!/usr/bin/env python3
-"""Can gateway — omni-commander V2, Step 1 (formal).
+"""Can gateway — omni-commander V2, Steps 1-2 (v1.1 relay).
 
 A single-file remote MCP server with OAuth 2.1, product name "Can":
   - branded landing page at / and a branded consent page at /can/consent
   - OAuth: DCR (/oauth/register), authorize -> consent page (owner code),
     token (auth code + PKCE, refresh rotation), revoke
   - MCP endpoint at /mcp (Streamable HTTP), bearer-token protected
-  - Step-1 tools only, executed here on the gateway host:
-      can_status     (read)  - report gateway online
-      can_write_note (write) - append a line to write-log.txt
+  - tools are RELAYED to the owner's local agent (Step 2): the agent
+    dials out to /agent/heartbeat + /agent/poll (long-poll) with a shared
+    agent key, executes jobs on the owner's computer, and posts results
+    to /agent/result. If no agent has heartbeated within CAN_AGENT_TTL
+    seconds, tools answer agent_offline truthfully — never fake a local
+    execution on the gateway host.
+      can_status     (read)  - the agent reports the computer's state
+      can_write_note (write) - the agent appends a line on the computer
   - every JSON-RPC request is logged to traffic.log; tool calls to
     tool-calls.log (ground truth for acceptance tests)
 
@@ -23,6 +28,7 @@ Config comes from the environment (see .env):
 State (registered clients, codes, tokens) persists to state.json so a
 gateway restart does not force re-registration. Single user: the owner.
 """
+import asyncio
 import json
 import os
 import secrets
@@ -49,7 +55,7 @@ from mcp.shared.auth import OAuthClientInformationFull, OAuthToken
 from mcp.types import ToolAnnotations
 from pydantic import AnyHttpUrl
 from starlette.requests import Request
-from starlette.responses import FileResponse, HTMLResponse, RedirectResponse
+from starlette.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse
 
 BASE = Path(__file__).resolve().parent
 STATE_FILE = BASE / "state.json"
@@ -61,6 +67,8 @@ ICON_256 = BASE / "assets" / "icon-256.png"
 
 PUBLIC_URL = os.environ["CAN_PUBLIC_URL"].rstrip("/")
 OWNER_CODE = os.environ["CAN_OWNER_CODE"]
+AGENT_KEY = os.environ.get("CAN_AGENT_KEY", "")
+AGENT_TTL = int(os.environ.get("CAN_AGENT_TTL", "45"))
 PORT = int(os.environ.get("CAN_PORT", "8792"))
 SCOPES = ["can:tools", "offline_access"]
 ACCESS_TTL = 8 * 3600
@@ -215,22 +223,119 @@ mcp = FastMCP(
 )
 
 
+# ---------------------------------------------------------------- agent relay
+# The local agent dials out; jobs wait in memory for it to claim them.
+
+jobs: dict[str, dict] = {}
+
+
+def agent_info() -> dict:
+    return store.data.get("agent") or {}
+
+
+def agent_online() -> bool:
+    return bool(agent_info()) and (time.time() - agent_info().get("last_seen", 0) <= AGENT_TTL)
+
+
+async def relay(tool: str, arguments: dict, timeout: float = 30.0) -> str | None:
+    """Queue a job for the local agent and wait for its result string."""
+    job_id = secrets.token_urlsafe(12)
+    fut = asyncio.get_running_loop().create_future()
+    jobs[job_id] = {"tool": tool, "arguments": arguments, "future": fut, "claimed": False}
+    log_line(TOOL_LOG, f"{time.strftime('%H:%M:%S')} RELAY {tool} job={job_id} args={arguments!r}")
+    try:
+        result = await asyncio.wait_for(fut, timeout)
+        log_line(TOOL_LOG, f"{time.strftime('%H:%M:%S')} RESULT {tool} job={job_id} ok")
+        return result
+    except asyncio.TimeoutError:
+        log_line(TOOL_LOG, f"{time.strftime('%H:%M:%S')} TIMEOUT {tool} job={job_id}")
+        return None
+    finally:
+        jobs.pop(job_id, None)
+
+
+def _agent_key_ok(request: Request) -> bool:
+    return bool(AGENT_KEY) and secrets.compare_digest(request.headers.get("x-agent-key", ""), AGENT_KEY)
+
+
+@mcp.custom_route("/agent/heartbeat", methods=["POST"])
+async def agent_heartbeat(request: Request):
+    if not _agent_key_ok(request):
+        return JSONResponse({"error": "bad agent key"}, status_code=403)
+    try:
+        info = await request.json()
+    except Exception:
+        info = {}
+    info = {k: info.get(k) for k in ("agent_id", "name", "hostname", "os", "version")}
+    store.data["agent"] = {**info, "last_seen": time.time()}
+    store.save()
+    return JSONResponse({"ok": True})
+
+
+@mcp.custom_route("/agent/poll", methods=["GET"])
+async def agent_poll(request: Request):
+    if not _agent_key_ok(request):
+        return JSONResponse({"error": "bad agent key"}, status_code=403)
+    wait = min(float(request.query_params.get("wait", "25")), 30.0)
+    deadline = time.time() + wait
+    while True:
+        for job_id, job in jobs.items():
+            if not job["claimed"]:
+                job["claimed"] = True
+                return JSONResponse({"job_id": job_id, "tool": job["tool"], "arguments": job["arguments"]})
+        if time.time() >= deadline:
+            return JSONResponse({}, status_code=204)
+        await asyncio.sleep(0.4)
+
+
+@mcp.custom_route("/agent/result", methods=["POST"])
+async def agent_result(request: Request):
+    if not _agent_key_ok(request):
+        return JSONResponse({"error": "bad agent key"}, status_code=403)
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"error": "bad json"}, status_code=400)
+    job = jobs.get(str(body.get("job_id", "")))
+    if job and not job["future"].done():
+        if body.get("ok"):
+            job["future"].set_result(str(body.get("result", "")))
+        else:
+            job["future"].set_result(json.dumps({"error": "agent_error", "detail": str(body.get("result", ""))}))
+    return JSONResponse({"ok": True})
+
+
 @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False, idempotentHint=True))
-def can_status() -> str:
-    """Report whether the owner's Can gateway is online. Read-only."""
+async def can_status() -> str:
+    """Report whether the owner's computer is online, via the Can agent on that computer. Read-only."""
     log_line(TOOL_LOG, f"{time.strftime('%H:%M:%S')} CALL can_status")
-    return json.dumps({
-        "product": "Can", "status": "online", "nonce": "CAN-STATUS-1105",
-        "server_time": time.strftime("%Y-%m-%d %H:%M:%S"),
-    })
+    if not agent_online():
+        return json.dumps({
+            "product": "Can", "status": "agent_offline",
+            "detail": "The Can agent on the owner's computer has not checked in recently.",
+            "nonce": "CAN-STATUS-1105",
+            "gateway_time": time.strftime("%Y-%m-%d %H:%M:%S"),
+        })
+    result = await relay("can_status", {})
+    if result is None:
+        return json.dumps({"product": "Can", "status": "agent_timeout", "nonce": "CAN-STATUS-1105"})
+    return result
 
 
 @mcp.tool(annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=False, idempotentHint=False))
-def can_write_note(text: str) -> str:
-    """Append a short note to the Can gateway write-log. This is a WRITE action."""
+async def can_write_note(text: str) -> str:
+    """Append a short note to the Can write-log on the owner's computer, via the Can agent. This is a WRITE action."""
     log_line(TOOL_LOG, f"{time.strftime('%H:%M:%S')} CALL can_write_note text={text!r}")
-    log_line(WRITE_LOG, f"{time.strftime('%Y-%m-%d %H:%M:%S')} {text}")
-    return json.dumps({"written": True, "echo": text, "nonce": "CAN-WRITE-1105"})
+    if not agent_online():
+        return json.dumps({
+            "written": False, "error": "agent_offline",
+            "detail": "The Can agent on the owner's computer is offline; nothing was written.",
+            "nonce": "CAN-WRITE-1105",
+        })
+    result = await relay("can_write_note", {"text": text})
+    if result is None:
+        return json.dumps({"written": False, "error": "agent_timeout", "nonce": "CAN-WRITE-1105"})
+    return result
 
 
 PAGE_CSS = """
@@ -249,10 +354,16 @@ font-size:16px;padding:11px 34px;cursor:pointer}
 
 @mcp.custom_route("/", methods=["GET"])
 async def landing(request: Request):
+    info = agent_info()
+    if agent_online():
+        agent_line = f"电脑 agent 在线：{info.get('name') or info.get('hostname') or ''}"
+    else:
+        agent_line = "电脑 agent 离线"
     return HTMLResponse(f"""<!doctype html><html lang="zh"><head><meta charset="utf-8">
 <title>Can</title><link rel="icon" href="/icon-256.png"><style>{PAGE_CSS}</style></head>
 <body><div class="card"><img src="/icon-256.png" alt="Can">
 <h1>Can</h1><p>网关运行中。<br>在 ChatGPT 里添加 Can 连接器，即可从网页对话控制这台电脑。</p>
+<p>{agent_line}</p>
 </div></body></html>""")
 
 

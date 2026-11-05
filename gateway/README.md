@@ -2,10 +2,14 @@
 
 The cloud half of Can (omni-commander V2): a remote MCP server with
 OAuth 2.1 that ChatGPT web connects to as a custom connector. It
-authenticates the owner and (from Step 2 on) relays tool calls to the
-local agent on the owner's computer. Step 1 executes two starter tools
-on the gateway host itself: `can_status` (read) and `can_write_note`
-(write).
+authenticates the owner and relays tool calls to the local agent on
+the owner's computer (Step 2): the agent dials out to
+`/agent/heartbeat` and long-polls `/agent/poll` with a shared agent
+key, executes jobs locally, and posts results to `/agent/result`.
+Tools: `can_status` (read) and `can_write_note` (write), both executed
+by the agent on the computer. If the agent has not checked in within
+`CAN_AGENT_TTL` seconds (default 45), tools answer `agent_offline`
+truthfully — the gateway never fakes a local execution.
 
 ## Run
 
@@ -16,6 +20,8 @@ python3 -m venv .venv && ./.venv/bin/pip install "mcp<2"
 #   CAN_OWNER_CODE          code the owner types on the consent page
 #   CAN_STATIC_CLIENT_ID    optional pre-registered client id
 #   CAN_STATIC_CLIENT_SECRET  optional, for connectors without DCR
+#   CAN_AGENT_KEY           shared key the local agent presents
+#   CAN_AGENT_TTL           agent liveness window, seconds (default 45)
 #   CAN_PORT                listen port (default 8792)
 systemd: can-gateway.service (EnvironmentFile=.env)
 ```
