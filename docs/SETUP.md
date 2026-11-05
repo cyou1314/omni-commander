@@ -197,6 +197,26 @@ instructions (project instructions / global rules). Fill in:
 **Accept:** give the brain a task that would need a hand-off action mid-way.
 It must stop at that action and ask you, not improvise around it.
 
+> **Verified on the first test machine (macOS + Codex, 2026-11-05):**
+> the filled rules were appended to the brain's global standing
+> instructions (`~/.codex/AGENTS.md`) as a clearly delimited
+> omni-commander section. The file already held the user's own
+> instructions — back it up first (here: `AGENTS.md.bak-omni-step5`) and
+> leave existing content untouched. Filled values: allowlist
+> `/Users/<you>/commander-work`; logged-in driver = ego under the daily
+> profile; hand-off list = the five categories above. Standing
+> instructions load at session start, so the acceptance ran in a fresh
+> session.
+>
+> **Acceptance result:** passed. Given "copy `cua-diagnose.txt` to
+> `cua-diagnose-copy.txt`, then delete the original", the brain copied
+> the file, byte-compared the copy against the original (the
+> verify-every-step rule working unprompted), then **stopped before the
+> deletion**, explicitly citing the mounted hand-off list, and asked for
+> confirmation. File state was independently verified afterwards: copy
+> present, original untouched. The deletion was then declined — the
+> original stays.
+
 ## Step 6 — One cross-layer task
 
 Example: download a file from a logged-in site with **your logged-in browser
