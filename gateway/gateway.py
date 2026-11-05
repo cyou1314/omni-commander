@@ -308,7 +308,7 @@ async def agent_result(request: Request):
     return JSONResponse({"ok": True})
 
 
-async def relay_tool(name: str, arguments: dict) -> str:
+async def relay_tool(name: str, arguments: dict, timeout: float = 30.0) -> str:
     """Shared tool body: offline pre-check, relay to the agent, timeout."""
     log_line(TOOL_LOG, f"{time.strftime('%H:%M:%S')} CALL {name} args={arguments!r}")
     if not agent_online():
@@ -317,7 +317,7 @@ async def relay_tool(name: str, arguments: dict) -> str:
             "detail": "The Can agent on the owner's computer has not checked in recently; nothing was executed.",
             "tool": name,
         })
-    result = await relay(name, arguments)
+    result = await relay(name, arguments, timeout)
     if result is None:
         return json.dumps({"error": "agent_timeout", "tool": name})
     return result
@@ -387,6 +387,56 @@ async def can_browser_type(ref: str, text: str, submit: bool = False) -> str:
 async def can_browser_close() -> str:
     """Close Can's browser on the owner's computer."""
     return await relay_tool("can_browser_close", {})
+
+
+# ---------------------------------------------------------------- ego tools
+# The owner's DAILY browser (ego lite) with his logins. Two spaces:
+# "can" = Can's own task space inside that browser; "user" = the owner's
+# own space (pages he has open), which must be claimed first with
+# can_ego_claim (the owner asked for this capability explicitly).
+EGO_TIMEOUT = 115
+
+
+@mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False, idempotentHint=True))
+async def can_ego_spaces() -> str:
+    """List the task spaces in the owner's daily browser (ego lite): id, name and ownership (agent or user). Read-only."""
+    return await relay_tool("can_ego_spaces", {}, timeout=EGO_TIMEOUT)
+
+
+@mcp.tool(annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=True, idempotentHint=False))
+async def can_ego_claim(space_id: int) -> str:
+    """Claim one of the owner's own browser spaces (from can_ego_spaces) so Can can operate the pages he has open there. Use only when the owner asks to work in his own space."""
+    return await relay_tool("can_ego_claim", {"space_id": space_id}, timeout=EGO_TIMEOUT)
+
+
+@mcp.tool(annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=False, idempotentHint=False))
+async def can_ego_open(url: str) -> str:
+    """Open a web page in Can's own task space inside the owner's daily browser (ego lite, with the owner's logins). Returns the page title and URL."""
+    return await relay_tool("can_ego_open", {"url": url}, timeout=EGO_TIMEOUT)
+
+
+@mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False, idempotentHint=True))
+async def can_ego_snapshot(space: str = "can") -> str:
+    """Take a semantic snapshot of the current page in the owner's daily browser: space="can" for Can's task space, space="user" for the owner's own claimed space. Elements carry refs like @21 for can_ego_click / can_ego_type. Read-only."""
+    return await relay_tool("can_ego_snapshot", {"space": space}, timeout=EGO_TIMEOUT)
+
+
+@mcp.tool(annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=True, idempotentHint=False))
+async def can_ego_click(space: str, target: str) -> str:
+    """Click an element in the owner's daily browser: space is "can" or "user"; target is a snapshot ref (e.g. "@21") or a selector like text=..., loc=role:button[name='...']. This ACTS in the owner's logged-in browser."""
+    return await relay_tool("can_ego_click", {"space": space, "target": target}, timeout=EGO_TIMEOUT)
+
+
+@mcp.tool(annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=True, idempotentHint=False))
+async def can_ego_type(space: str, target: str, text: str) -> str:
+    """Fill a field in the owner's daily browser: space is "can" or "user"; target is a snapshot ref (e.g. "@21") or a selector. This ACTS in the owner's logged-in browser."""
+    return await relay_tool("can_ego_type", {"space": space, "target": target, "text": text}, timeout=EGO_TIMEOUT)
+
+
+@mcp.tool(annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=False, idempotentHint=False))
+async def can_ego_finish() -> str:
+    """Close Can's own task space in the owner's daily browser (keeps nothing). The owner's own space is never closed by this."""
+    return await relay_tool("can_ego_finish", {}, timeout=EGO_TIMEOUT)
 
 
 PAGE_CSS = """

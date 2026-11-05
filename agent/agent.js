@@ -15,6 +15,13 @@
  *   can_browser_*   -> drive Google Chrome via CDP with a dedicated
  *                      Can profile (NOT the owner's daily browser):
  *                      open / snapshot (refs) / click / type / close
+ *   can_ego_*       -> drive the owner's DAILY browser (ego lite, with
+ *                      the owner's logins) through the ego-browser CLI:
+ *                      spaces / claim / open / snapshot / click / type /
+ *                      finish. "can" space = Can's own task space in the
+ *                      daily browser; "user" space = the owner's own
+ *                      space (the pages he has open), claimed on his
+ *                      explicit request.
  * File tools are confined to the work folder (config.workRoot):
  * absolute paths, ".." escapes and symlink escapes are refused.
  * can_run_command has a 30s timeout, capped output, and a starter
@@ -37,7 +44,7 @@ const STARTED = Date.now();
 const LOG = path.join(DIR, "agent.log");
 const STATUS = path.join(DIR, "status.json");
 const WRITELOG = path.join(DIR, "write-log.txt");
-const AGENT_VERSION = "0.4.0";
+const AGENT_VERSION = "0.5.0";
 
 function log(msg) {
   const line = `[${new Date().toISOString()}] ${msg}\n`;
@@ -390,6 +397,160 @@ async function toolBrowserClose() {
 
 process.on("exit", () => { if (browser) { try { browser.proc.kill(); } catch (e) {} } });
 
+/* ------------------------------------------------------------ ego layer */
+/* The owner's daily browser is ego lite. Its automation surface is the
+ * `ego-browser nodejs` runtime: each call runs a fresh Node script with
+ * ego globals (taskSpace, claimTaskSpace, listTaskSpaces, Page API).
+ * Scripts print one "CAN_RESULT {json}" line for the agent to parse. */
+const EGO_BIN = "/Users/cyou/.local/bin/ego-browser";
+const EGO_STATE = path.join(DIR, "ego-state.json");
+const EGO_CAN_SPACE = "Can";
+
+function egoState() {
+  try { return JSON.parse(fs.readFileSync(EGO_STATE, "utf8")); }
+  catch (e) { return {}; }
+}
+function saveEgoState(patch) {
+  const s = Object.assign(egoState(), patch);
+  fs.writeFileSync(EGO_STATE, JSON.stringify(s, null, 2) + "\n");
+  return s;
+}
+
+function runEgo(script, timeoutMs) {
+  return new Promise((resolve, reject) => {
+    const child = spawn(EGO_BIN, ["nodejs"], { stdio: ["pipe", "pipe", "pipe"] });
+    let out = "", err = "";
+    const timer = setTimeout(() => {
+      try { child.kill(); } catch (e) {}
+      reject(new Error("ego script timed out"));
+    }, timeoutMs || 100000);
+    child.stdout.on("data", (d) => { out += d.toString(); });
+    child.stderr.on("data", (d) => { err += d.toString(); });
+    child.on("error", (e) => { clearTimeout(timer); reject(e); });
+    child.on("close", (code) => {
+      clearTimeout(timer);
+      const line = out.split("\n").find((l) => l.startsWith("CAN_RESULT "));
+      if (line) {
+        try { resolve(JSON.parse(line.slice("CAN_RESULT ".length))); return; }
+        catch (e) { /* fall through to error */ }
+      }
+      reject(new Error("ego failed (exit " + code + "): " + (err || out).slice(-600)));
+    });
+    child.stdin.write(script);
+    child.stdin.end();
+  });
+}
+
+const EGO_USER_PAGE_FN = `
+async function userPageOf(task) {
+  let page = task.userPage();
+  try { await page.url(); return page; } catch (e) {}
+  const tabs = await task.tabs();
+  const t = tabs.find((x) => x.active) || tabs[0];
+  if (t && !t.label) page = await task.adopt(t.page);
+  else if (t && t.label) page = task.page(t.label);
+  return page;
+}
+`;
+
+function egoTaskSnippet(space) {
+  if (space === "user") {
+    const id = egoState().userSpaceId;
+    if (!id) throw new Error("no user space claimed yet; call can_ego_claim first");
+    return `let task; try { task = await taskSpace(${Number(id)}); } catch (e) { task = await claimTaskSpace(${Number(id)}); }\n`;
+  }
+  return `const task = await taskSpace(${JSON.stringify(EGO_CAN_SPACE)});\n`;
+}
+
+function egoPageSnippet(space) {
+  if (space === "user") return EGO_USER_PAGE_FN + "const page = await userPageOf(task);\n";
+  return 'const page = task.page("p1");\n';
+}
+
+async function toolEgoSpaces() {
+  const r = await runEgo(
+    'const spaces = await listTaskSpaces();\n' +
+    'console.log("CAN_RESULT " + JSON.stringify(spaces.map((s) => ({ id: s.id, name: s.name, ownership: s.ownership }))));\n');
+  return JSON.stringify({ spaces: r });
+}
+
+async function toolEgoClaim(args) {
+  const id = Number(args && args.space_id);
+  if (!Number.isFinite(id) || id <= 0) throw new Error("space_id must be a positive number from can_ego_spaces");
+  const script =
+    `const task = await claimTaskSpace(${id});\n` +
+    "let url = null, title = null;\n" +
+    "try { const p = task.userPage(); url = await p.url(); title = await p.title(); } catch (e) {}\n" +
+    'console.log("CAN_RESULT " + JSON.stringify({ claimed: true, spaceId: task.spaceId, name: task.name, user_page: { url, title } }));\n';
+  const r = await runEgo(script);
+  saveEgoState({ userSpaceId: id });
+  return JSON.stringify(r);
+}
+
+async function toolEgoOpen(args) {
+  const url = String((args && args.url) || "");
+  if (!/^https?:\/\//i.test(url)) throw new Error("url must start with http:// or https://");
+  const script =
+    egoTaskSnippet("can") +
+    egoPageSnippet("can") +
+    `await page.goto(${JSON.stringify(url)});\n` +
+    'console.log("CAN_RESULT " + JSON.stringify({ spaceId: task.spaceId, url: await page.url(), title: await page.title() }));\n';
+  const r = await runEgo(script);
+  return JSON.stringify(r);
+}
+
+async function toolEgoSnapshot(args) {
+  const space = args && args.space === "user" ? "user" : "can";
+  const script =
+    egoTaskSnippet(space) +
+    egoPageSnippet(space) +
+    "const snap = await page.snapshot();\n" +
+    'console.log("CAN_RESULT " + JSON.stringify({ spaceId: task.spaceId, url: await page.url(), snapshot: snap }));\n';
+  const r = await runEgo(script);
+  const SNAP_CAP = 12000;
+  if (typeof r.snapshot === "string" && r.snapshot.length > SNAP_CAP) {
+    r.snapshot = r.snapshot.slice(0, SNAP_CAP);
+    r.truncated = true;
+  }
+  return JSON.stringify(r);
+}
+
+async function toolEgoClick(args) {
+  const space = args && args.space === "user" ? "user" : "can";
+  const target = String((args && args.target) || "");
+  if (!target) throw new Error("target is required (a snapshot ref like @21 or a selector)");
+  const script =
+    egoTaskSnippet(space) +
+    egoPageSnippet(space) +
+    `await page.click(${JSON.stringify(target)}, { label: "Can click" });\n` +
+    'console.log("CAN_RESULT " + JSON.stringify({ clicked: true, url: await page.url(), title: await page.title() }));\n';
+  const r = await runEgo(script);
+  return JSON.stringify(r);
+}
+
+async function toolEgoType(args) {
+  const space = args && args.space === "user" ? "user" : "can";
+  const target = String((args && args.target) || "");
+  const text = String((args && args.text) ?? "");
+  if (!target) throw new Error("target is required (a snapshot ref like @21 or a selector)");
+  const script =
+    egoTaskSnippet(space) +
+    egoPageSnippet(space) +
+    `await page.fill(${JSON.stringify(target)}, ${JSON.stringify(text)});\n` +
+    'console.log("CAN_RESULT " + JSON.stringify({ filled: true, url: await page.url() }));\n';
+  const r = await runEgo(script);
+  return JSON.stringify(r);
+}
+
+async function toolEgoFinish() {
+  const script =
+    egoTaskSnippet("can") +
+    "await task.finish({ keep: [] });\n" +
+    'console.log("CAN_RESULT " + JSON.stringify({ finished: true }));\n';
+  const r = await runEgo(script);
+  return JSON.stringify(r);
+}
+
 /* ------------------------------------------------------------ dispatch */
 async function execute(tool, args) {
   switch (tool) {
@@ -417,6 +578,13 @@ async function execute(tool, args) {
     case "can_browser_click": return toolBrowserClick(args);
     case "can_browser_type": return toolBrowserType(args);
     case "can_browser_close": return toolBrowserClose();
+    case "can_ego_spaces": return toolEgoSpaces();
+    case "can_ego_claim": return toolEgoClaim(args);
+    case "can_ego_open": return toolEgoOpen(args);
+    case "can_ego_snapshot": return toolEgoSnapshot(args);
+    case "can_ego_click": return toolEgoClick(args);
+    case "can_ego_type": return toolEgoType(args);
+    case "can_ego_finish": return toolEgoFinish();
     default: throw new Error("unknown tool: " + tool);
   }
 }
@@ -439,10 +607,11 @@ async function pollOnce() {
 async function main() {
   log(`Can agent ${AGENT_VERSION} starting; gateway=${GATEWAY} computer=${COMPUTER} macos=${MACOS} workRoot=${ROOT}`);
   writeStatus("starting");
-  let lastHb = 0;
+  // Heartbeat runs on its own timer so long jobs (ego) cannot starve it.
+  setInterval(() => { heartbeat().catch(() => {}); }, 20000);
+  heartbeat().catch(() => {});
   for (;;) {
     try {
-      if (Date.now() - lastHb > 20000) { await heartbeat(); lastHb = Date.now(); }
       await pollOnce();
     } catch (e) {
       log("loop error: " + (e && e.message || e));
