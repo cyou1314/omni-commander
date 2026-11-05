@@ -151,6 +151,41 @@ prove this layer last and expect rough edges.
 Calculator **in the background** while you keep using the machine in the
 foreground — your cursor and focus are never taken.
 
+> **Verified on the first test machine (macOS + Codex, 2026-11-05):**
+> Cua Driver **0.38.0** (`/Applications/CuaDriver.app`; the CLI is a
+> symlink at `~/.local/bin/cua-driver`). The install download can be very
+> slow behind a proxy (≈14 min for ≈38 MB on the test machine) — judge by
+> the app appearing, not by silence. The `mcp-config` output matched the
+> example config exactly. Config backup before registering:
+> `config.toml.bak-omni-step4`.
+>
+> **Permission gotcha:** flipping the Accessibility and Screen Recording
+> switches ON in System Settings is *not* sufficient proof — the first
+> tool call afterwards still failed with `permissions_pending`, and
+> neither `cua-driver doctor` nor `cua-driver diagnose` can confirm TCC
+> state from outside (doctor reports the permission rows "not checked"
+> without Full Disk Access; diagnose's daemon probes read
+> `unknown (daemon unavailable)` and it cannot open the TCC database).
+> The reliable check is to run `cua-driver permissions grant` **again**
+> after toggling: it verifies against the live daemon and ends with
+> `Accessibility and Screen Recording are granted.` plus
+> `✅ CuaDriver has Accessibility, Screen Recording, and direct capture
+> access.` (exit 0). Expect it to also request a third consent — direct
+> capture, bypassing the system window picker — that is part of the flow.
+>
+> **Transport gotcha:** the grant flow restarts the driver daemon, which
+> kills the MCP transport of any client session already open — the next
+> tool call in that session returns `Transport closed`. Run the
+> acceptance in a **fresh session started after** permissions verify.
+>
+> **Acceptance result:** passed. The brain launched Calculator, read its
+> accessibility tree, pressed 6, ×, 7, = via background AXPress, and read
+> the display back as `42` (previous expression `6 × 7`); `launch_app`
+> reported suppressing Calculator's focus grab, and the frontmost app was
+> verified unchanged before and after. Note: a fresh install enables
+> content-free product telemetry by default — `cua-driver telemetry
+> disable` turns it off.
+
 ## Step 5 — Router rules and the hand-off list
 
 Copy `rules/ROUTER.md` into wherever your brain client reads standing
