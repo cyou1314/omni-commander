@@ -8,6 +8,8 @@ script. Next time, the script runs — nobody improvises twice.**
 - ego batch scripts (one `ego-browser nodejs` heredoc per flow)
 - shell scripts for local file / terminal flows
 - Playwright flows that must be reproducible
+- cross-layer runbooks (`.md`): flows the brain executes across layers,
+  written as exact step lists with a verification check at every hand-off
 
 ## File conventions
 
