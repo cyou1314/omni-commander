@@ -53,7 +53,7 @@ const STARTED = Date.now();
 const LOG = path.join(DIR, "agent.log");
 const STATUS = path.join(DIR, "status.json");
 const WRITELOG = path.join(DIR, "write-log.txt");
-const AGENT_VERSION = "0.8.8";
+const AGENT_VERSION = "0.8.9";
 
 function log(msg) {
   const line = `[${new Date().toISOString()}] ${msg}\n`;
@@ -894,7 +894,10 @@ async function toolDesktopBatch(args) {
         out.push({ step: i, op, ok: true, count: lastSnapshot.count });
       } else if (op === "click") {
         const ref = resolveRef(s);
-        if (!ref) throw new Error("click step needs a ref or a label matching the last snapshot");
+        if (!ref) {
+          const labels = ((lastSnapshot && lastSnapshot.elements) || []).map((e) => e.label).filter(Boolean).slice(0, 40).join(" | ");
+          throw new Error("click step needs a ref or a label matching the last snapshot" + (s.label ? ` (no element labelled "${s.label}")` : "") + (labels ? `; available labels: ${labels}` : ""));
+        }
         await toolDesktopClick({ ...s, ref });
         out.push({ step: i, op, ok: true, ref });
       } else if (op === "type") {
