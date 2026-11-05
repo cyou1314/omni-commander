@@ -35,9 +35,9 @@ see and control your own computer.**
 
 ## Steps (one at a time, each verified before the next)
 
-- **Step 0 — Name and icon.** Product name confirmed: **Can**
-  (2026-11-05). Icon candidates are generated, owner picks. Every later
-  surface uses them.
+- **Step 0 — Name and icon.** Done 2026-11-05: product name **Can**;
+  icon supplied by the owner (glossy white rounded-triangle play mark,
+  `assets/can-icon.png`). Every later surface uses them.
 - **Step 1 — Web chain proof (the critical one).** Minimal gateway: branded
   login page + MCP endpoint + relay, registered as a custom connector in
   ChatGPT web, exposing exactly one harmless tool (report whether the
