@@ -53,7 +53,7 @@ const STARTED = Date.now();
 const LOG = path.join(DIR, "agent.log");
 const STATUS = path.join(DIR, "status.json");
 const WRITELOG = path.join(DIR, "write-log.txt");
-const AGENT_VERSION = "0.8.4";
+const AGENT_VERSION = "0.8.5";
 
 function log(msg) {
   const line = `[${new Date().toISOString()}] ${msg}\n`;
@@ -862,6 +862,33 @@ async function toolDesktopKey(args) {
   return JSON.stringify({ pressed: true, key });
 }
 
+async function toolDesktopScreenshot(args) {
+  const maxDim = Math.min(Math.max(Number((args && args.max_dim) || 1600), 320), 2560);
+  const full = await cuaCallFull("get_desktop_state", { max_image_dimension: maxDim });
+  const content = (full.raw && full.raw.content) || [];
+  let img = null;
+  for (const block of content) {
+    if (block && block.type === "image" && block.data) { img = block; break; }
+  }
+  const sc = full.sc || {};
+  if (!img) {
+    // Fallback: some builds carry the payload inside structuredContent.
+    for (const k of Object.keys(sc)) {
+      if (typeof sc[k] === "string" && sc[k].length > 20000) {
+        img = { data: sc[k], mimeType: sc.screenshot_mime_type || "image/png" };
+        break;
+      }
+    }
+  }
+  if (!img) throw new Error("the desktop engine returned no screenshot image");
+  return JSON.stringify({
+    screenshot_png_b64: img.data,
+    mime: img.mimeType || sc.screenshot_mime_type || "image/png",
+    screen_width: sc.screen_width, screen_height: sc.screen_height,
+    screenshot_width: sc.screenshot_width, screenshot_height: sc.screenshot_height,
+  });
+}
+
 /* ------------------------------------------------------------ the fence */
 /* Step 4. Three layers, all enforced HERE on the owner's computer:
  * 1) Hard blocks: catastrophic command patterns never run (BLOCKED).
@@ -1063,6 +1090,7 @@ async function execute(tool, args) {
     case "can_desktop_click": return toolDesktopClick(args);
     case "can_desktop_type": return toolDesktopType(args);
     case "can_desktop_key": return toolDesktopKey(args);
+    case "can_desktop_screenshot": return toolDesktopScreenshot(args);
     default: throw new Error("unknown tool: " + tool);
   }
 }

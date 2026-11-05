@@ -55,7 +55,7 @@ from mcp.server.auth.settings import (
 from mcp.server.fastmcp import FastMCP
 from mcp.server.transport_security import TransportSecuritySettings
 from mcp.shared.auth import OAuthClientInformationFull, OAuthToken
-from mcp.types import ToolAnnotations
+from mcp.types import ImageContent, TextContent, ToolAnnotations
 from pydantic import AnyHttpUrl
 from starlette.requests import Request
 from starlette.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse
@@ -393,6 +393,28 @@ async def can_desktop_type(ref: str, text: str, pid: int = 0, window_id: int = 0
 async def can_desktop_key(key: str, ref: str = "", pid: int = 0, window_id: int = 0) -> str:
     """Press one key (return, tab, escape, space, delete, up/down/left/right, f1-f12, a letter or digit) in a window on the owner's computer, optionally targeting an element ref from can_desktop_snapshot. Fence: the owner must approve it in a dialog ON the computer itself; denied or unanswered returns an owner_denied error and no key is pressed."""
     return await relay_tool("can_desktop_key", {"key": key, "ref": ref, "pid": pid, "window_id": window_id}, timeout=115)
+
+
+@mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False, idempotentHint=True))
+async def can_desktop_screenshot(max_dim: int = 1600) -> list:
+    """Take a REAL screenshot of the owner's computer screen (the whole display) and return it as an image visible in this conversation. Use it whenever the user asks to SEE the screen, or when a structural snapshot is not enough to know what is on it. max_dim caps the image's long edge in pixels (default 1600). Read-only: nothing on the computer is touched."""
+    raw = await relay_tool("can_desktop_screenshot", {"max_dim": max_dim}, timeout=60)
+    try:
+        data = json.loads(raw)
+    except Exception:
+        return [TextContent(type="text", text=raw)]
+    b64 = data.get("screenshot_png_b64") if isinstance(data, dict) else None
+    if not b64:
+        return [TextContent(type="text", text=raw)]
+    summary = (
+        f"Screenshot of the owner's computer screen "
+        f"({data.get('screenshot_width')}x{data.get('screenshot_height')} image, "
+        f"display {data.get('screen_width')}x{data.get('screen_height')})."
+    )
+    return [
+        TextContent(type="text", text=summary),
+        ImageContent(type="image", data=b64, mimeType=data.get("mime") or "image/png"),
+    ]
 
 
 @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False, idempotentHint=True))
