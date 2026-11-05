@@ -1,0 +1,19 @@
+# dependencies and build output
+node_modules/
+dist/
+
+# local runtime state — never commit
+logs/
+*.log
+.env
+.env.*
+
+# device / session credentials (Desktop Commander remote, Cua, etc.)
+.desktop-commander-device/
+.mqtt/
+device.json
+
+# OS / editor noise
+.DS_Store
+.idea/
+.vscode/
