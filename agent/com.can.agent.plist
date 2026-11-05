@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.can.agent</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/Users/cyou/node/bin/node</string>
+    <string>/Users/cyou/can-agent/agent.js</string>
+  </array>
+  <key>WorkingDirectory</key>
+  <string>/Users/cyou/can-agent</string>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key>
+    <string>/Users/cyou/node/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+  </dict>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <true/>
+  <key>StandardOutPath</key>
+  <string>/Users/cyou/can-agent/launchd-out.log</string>
+  <key>StandardErrorPath</key>
+  <string>/Users/cyou/can-agent/launchd-err.log</string>
+</dict>
+</plist>
