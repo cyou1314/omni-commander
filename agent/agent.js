@@ -53,7 +53,7 @@ const STARTED = Date.now();
 const LOG = path.join(DIR, "agent.log");
 const STATUS = path.join(DIR, "status.json");
 const WRITELOG = path.join(DIR, "write-log.txt");
-const AGENT_VERSION = "0.8.2";
+const AGENT_VERSION = "0.8.3";
 
 function log(msg) {
   const line = `[${new Date().toISOString()}] ${msg}\n`;
@@ -594,7 +594,11 @@ async function toolEgoFinish() {
  * (the extension route was built, verified, then dropped on the
  * owner's decision, 2026-11-05). */
 const CUA_BIN = cfg.cuaPath || "/Users/cyou/.local/bin/cua-driver";
-const CUA_SESSION = "can";
+// Unique per agent process: the driver daemon tombstones a session
+// label when the transport that created it dies, so reusing a fixed
+// label across agent restarts ends in "session has ended" /
+// "session is not available to this transport" (verified 2026-11-05).
+const CUA_SESSION = "can-" + process.pid;
 let cuaChild = null;
 let cuaBuf = "";
 let cuaSeq = 0;
@@ -698,9 +702,20 @@ async function cuaCall(name, args) {
 }
 
 async function cuaListWindows(app) {
-  const r = await cuaCall("list_windows", app ? { app } : {});
-  const wins = Array.isArray(r) ? r : (r.windows || []);
-  return Array.isArray(wins) ? wins : [];
+  // Always fetch the unfiltered list and match locally: the driver's
+  // own app filter matches localized app names only (Calculator ->
+  // 0 hits while it runs as 计算器) and misses off-screen windows.
+  const r = await cuaCall("list_windows", {});
+  let wins = Array.isArray(r) ? r : (r.windows || []);
+  if (!Array.isArray(wins)) wins = [];
+  if (app) {
+    const q = String(app).toLowerCase();
+    wins = wins.filter((w) => {
+      const n = String(w.app_name || w.app || "").toLowerCase();
+      return n && (n.includes(q) || q.includes(n));
+    });
+  }
+  return wins;
 }
 
 function deskKey(pid, wid) { return pid + ":" + wid; }
