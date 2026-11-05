@@ -53,7 +53,7 @@ const STARTED = Date.now();
 const LOG = path.join(DIR, "agent.log");
 const STATUS = path.join(DIR, "status.json");
 const WRITELOG = path.join(DIR, "write-log.txt");
-const AGENT_VERSION = "0.8.1";
+const AGENT_VERSION = "0.8.2";
 
 function log(msg) {
   const line = `[${new Date().toISOString()}] ${msg}\n`;
@@ -638,6 +638,12 @@ function cuaSpawn() {
       clientInfo: { name: "can-agent", version: AGENT_VERSION },
     });
     try { child.stdin.write(JSON.stringify({ jsonrpc: "2.0", method: "notifications/initialized" }) + "\n"); } catch (e) {}
+    // The driver daemon ties tool calls to a named session; open ours
+    // explicitly (a bare tools/call works only while an implicit
+    // session happens to be alive, and it dies with our child process).
+    try {
+      await cuaRequest("tools/call", { name: "start_session", arguments: { session: CUA_SESSION } });
+    } catch (e) { log("cua start_session note: " + String(e && e.message || e).slice(0, 160)); }
     log("cua driver connected (internal desktop engine)");
     return r;
   })();
@@ -665,13 +671,22 @@ function cuaText(result) {
   return "";
 }
 
-async function cuaCallFull(name, args) {
+async function cuaCallFull(name, args, retried) {
   if (!cuaChild) cuaSpawn();
   await cuaReady;
   const result = await cuaRequest("tools/call", {
     name, arguments: Object.assign({ session: CUA_SESSION }, args || {}),
   });
-  if (result && result.isError) throw new Error(cuaText(result) || ("cua tool failed: " + name));
+  if (result && result.isError) {
+    const msg = cuaText(result) || ("cua tool failed: " + name);
+    // The daemon-side session can end under us (e.g. our previous
+    // child died); reopen it and retry the call exactly once.
+    if (!retried && /session has ended|start_session/i.test(msg) && name !== "start_session") {
+      try { await cuaRequest("tools/call", { name: "start_session", arguments: { session: CUA_SESSION } }); } catch (e) {}
+      return cuaCallFull(name, args, true);
+    }
+    throw new Error(msg);
+  }
   return { sc: (result && result.structuredContent) || null, text: cuaText(result), raw: result || {} };
 }
 
