@@ -4,7 +4,7 @@ Rules of the road:
 
 - Do not skip ahead. A step is done only when its acceptance check passes.
 - One primary tool per layer. Overlapping primaries are how brains pick the wrong tool and things fall over.
-- Commands below are macOS-first (the first machine this was built on). Paths with `/Users/you/...` are placeholders — replace with your real paths.
+- **Cross-platform by design:** the steps are identical on Windows, macOS and Linux. Where a command or path differs, all three variants are given. Placeholders like `/Users/you/...` / `C:\Users\you\...` must be replaced with your real paths.
 
 ## Step 0 — Node version
 
@@ -25,14 +25,17 @@ Pick one MCP client as the V1 entry point (Claude Code, Codex, Cursor…).
 Others can be added later by copying the same config — the tools are installed
 once, the brains are interchangeable.
 
-Copy `config/mcp-servers.example.json`, adjust the paths, and put it in your
-client's MCP config.
+Copy the config file for your OS — `config/mcp-servers.windows.json`,
+`config/mcp-servers.macos.json` or `config/mcp-servers.linux.json` — adjust
+the paths, and put it in your client's MCP config.
 
-> **macOS pitfall (learned the hard way):** MCP clients spawn servers with a
-> stripped environment. If `npx` is not on that PATH, the server silently
-> fails to start and *no tools appear, with no error*. Always use the
-> **absolute path** to `npx` and pass `env.PATH` explicitly, as the example
-> config does.
+> **Pitfall, all OSes (learned the hard way):** MCP clients spawn servers
+> with a stripped environment. If `npx` is not on that PATH, the server
+> silently fails to start and *no tools appear, with no error*.
+> - macOS / Linux: use the **absolute path** to `npx` and pass `env.PATH`
+>   explicitly, as the config files do.
+> - Windows: `npx` is a `.cmd` shim that many clients cannot spawn directly —
+>   the Windows config runs it through `cmd /c`, which is the standard fix.
 
 Restart the client.
 
@@ -47,12 +50,21 @@ Install [ego (lite)](https://lite.ego.app), migrate your Chrome state when it
 offers, and make sure the `ego-browser` skill is visible to your brain client
 (ego installs it for common clients on first run; activate with `/ego-browser`).
 
+Platform reality for this layer: ego is full-featured on **macOS**, in
+**beta on Windows**, and **not yet available on Linux**. On Linux (or if the
+Windows beta misbehaves), fill the same role with the fallback: Chrome
+DevTools MCP attached to your daily Chrome, or
+[agent-browser](https://github.com/vercel-labs/agent-browser) driving your
+real profile. The acceptance check below is written against the *role*, so
+it applies to whichever driver you use.
+
 Division of labour, write it down for your brain: **needs your login → ego;
 does not need login / must be reproducible → Playwright (Step 3).**
 
-**Accept:** the brain opens a Space in ego, loads a site you are logged into,
-takes a semantic snapshot, finds a named button and clicks it — without
-touching the tabs you are personally using.
+**Accept:** the brain opens an isolated workspace in your logged-in browser
+(an ego Space, or the fallback driver's equivalent session), loads a site you
+are logged into, takes a semantic snapshot, finds a named button and clicks
+it — without touching the tabs you are personally using.
 
 ## Step 3 — Playwright MCP, the clean browser
 
@@ -65,13 +77,29 @@ Actions must target snapshot refs, not coordinates.
 
 ## Step 4 — Cua Driver, the desktop layer
 
+Install (macOS / Linux):
+
 ```bash
 /bin/bash -c "$(curl -fsSL https://cua.ai/driver/install.sh)"
-cua-driver permissions grant   # grant Accessibility + Screen Recording to CuaDriver.app itself, not to your terminal
+```
+
+Install (Windows, PowerShell):
+
+```powershell
+irm https://raw.githubusercontent.com/trycua/cua/main/libs/cua-driver/scripts/install.ps1 | iex
+```
+
+Then, every OS:
+
+```bash
+cua-driver permissions grant   # macOS: grant Accessibility + Screen Recording to CuaDriver.app itself, not to your terminal; other OSes: follow its prompts
 cua-driver mcp-config          # prints the exact MCP registration for your machine — use it, don't hand-copy paths
 ```
 
-Add what `mcp-config` prints to your client config and restart.
+Add what `mcp-config` prints to your client config and restart. Platform
+status: Windows and macOS are the stable builds; the Linux build is a
+pre-release that needs an X11 / XWayland desktop with AT-SPI 2 — on Linux,
+prove this layer last and expect rough edges.
 
 > Cua Driver is an early preview. Prove it on harmless apps (Calculator,
 > Notes) before pointing it at anything that matters.
@@ -93,10 +121,10 @@ It must stop at that action and ask you, not improvise around it.
 
 ## Step 6 — One cross-layer task
 
-Example: download a file from a logged-in site with **ego** → rename and
-inspect it locally with **Desktop Commander** → open a local app with
-**Cua Driver** and enter the result. Every layer participates, every step is
-verified.
+Example: download a file from a logged-in site with **your logged-in browser
+driver** → rename and inspect it locally with **Desktop Commander** → open a
+local app with **Cua Driver** and enter the result. Every layer participates,
+every step is verified.
 
 **Accept:** end state matches what you asked for, and the task log shows which
 layer did what.

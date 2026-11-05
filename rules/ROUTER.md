@@ -9,8 +9,10 @@ for one reason: **structured first, pixels last, verify everything.**
 1. **Files, terminal, processes, any service with an API or CLI** →
    Desktop Commander / direct API calls. Never use the browser or the desktop
    to do what a direct call can do.
-2. **Web task that needs the user's real login** → ego, in its own Space.
-   Never touch the user's personal tabs.
+2. **Web task that needs the user's real login** → the logged-in browser
+   driver for this OS (ego where available; otherwise the documented
+   fallback), in its own isolated workspace. Never touch the user's personal
+   tabs.
 3. **Web task without login, or one that must be reproducible** →
    Playwright MCP. Act on accessibility-snapshot refs, never on screenshot
    coordinates when a snapshot exists.
@@ -49,8 +51,9 @@ work around these — they exist to stop exactly this kind of automation.
   Everything else is read-only unless the user says otherwise in this session.
 - Terminal: no destructive commands (`rm -rf`, disk tools, system settings
   changes) without explicit per-instance approval.
-- Browser: ego work happens in a Space; Playwright work happens in its own
-  browser profile. Neither borrows the other's session.
+- Browser: logged-in-driver work happens in its isolated workspace;
+  Playwright work happens in its own browser profile. Neither borrows the
+  other's session.
 - Desktop: Cua Driver runs in the background. If an app demands foreground
   focus, say so and let the user decide.
 

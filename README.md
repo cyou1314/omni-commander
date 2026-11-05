@@ -15,6 +15,34 @@ The brain is interchangeable. Claude, GPT, Gemini, DeepSeek — any client that
 speaks [MCP](https://modelcontextprotocol.io) can use the exact same stack.
 You assemble the hands once; you swap brains whenever you like.
 
+**And it is not tied to one computer or one OS.** The stack is a set of roles
+(file/terminal, browser, desktop), and every role has an implementation on
+each major desktop OS — see the platform matrix below. Your own machine is
+just the first test machine, not the target.
+
+## Platform support
+
+| Role | Windows | macOS | Linux |
+|------|---------|-------|-------|
+| Files / terminal — Desktop Commander MCP | ✅ | ✅ | ✅ |
+| Clean browser — Playwright MCP | ✅ | ✅ | ✅ |
+| Browser inspection — Chrome DevTools MCP (optional) | ✅ | ✅ | ✅ |
+| Desktop apps — Cua Driver | ✅ stable | ✅ stable | ⚠️ pre-release (X11 / XWayland, AT-SPI 2) |
+| Logged-in browser — ego | ⚠️ beta | ✅ | ❌ on vendor roadmap, no date |
+| Logged-in browser, fallback — agent-browser / Chrome DevTools MCP attached to your real Chrome | ✅ | ✅ | ✅ |
+
+Honest gaps, by design:
+
+- The **core stack (rows 1–4) runs on all three OSes today.** Nothing in the
+  router, the config format, or the workflows assumes a specific OS.
+- The **logged-in browser is the least portable layer.** ego is best on
+  macOS, beta on Windows, absent on Linux. That is why the router treats it
+  as a *role* ("logged-in browser driver"), not as a fixed product: on Linux
+  the fallback drivers above fill the same role.
+- Per-OS differences are quarantined into per-OS config files
+  (`config/mcp-servers.<os>.json`) and per-OS notes in the setup guide.
+  Everything above that layer — rules, routing, workflows — is shared.
+
 ## Why structured-first?
 
 Most "computer use" demos fail the same way: the model stares at screenshots
@@ -39,9 +67,9 @@ Plus three rules baked into the router (`rules/ROUTER.md`):
 | Component | Role | License / source |
 |-----------|------|------------------|
 | [Desktop Commander MCP](https://github.com/wonderwhy-er/DesktopCommanderMCP) | Files, terminal, processes | MIT, open source |
-| [ego (lite)](https://lite.ego.app) + ego-browser skill | Logged-in browser, isolated Spaces | Browser binary closed source, free; skill open |
+| [ego (lite)](https://lite.ego.app) + ego-browser skill | Logged-in browser, isolated Spaces (macOS full, Windows beta; Linux: use the fallback drivers in the platform matrix) | Browser binary closed source, free; skill open |
 | [Playwright MCP](https://github.com/microsoft/playwright-mcp) (Microsoft) | Clean browser automation | Apache-2.0 |
-| [Cua Driver](https://github.com/trycua/cua) | Background desktop app control | MIT, early preview |
+| [Cua Driver](https://github.com/trycua/cua) | Background desktop app control | MIT, early preview; Windows/macOS stable, Linux pre-release |
 | `rules/`, `workflows/`, `config/` in this repo | The router, guardrails and setup — the part we actually write | MIT (this repo) |
 
 Optional, add only when needed: Chrome DevTools MCP (browser debugging /
@@ -49,12 +77,14 @@ network / performance inspection).
 
 ## Quick start
 
-V1 is local-only, single user, macOS first. Follow the step-by-step guide —
-one step at a time, each with its own acceptance check:
+V1 is local-only, single user, and cross-platform (Windows / macOS / Linux).
+Follow the step-by-step guide — one step at a time, each with its own
+acceptance check:
 
 ➡️ **[docs/SETUP.md](docs/SETUP.md)**
 
-Short version: Node ≥ 22.12 → copy `config/mcp-servers.example.json` into your
+Short version: Node ≥ 22.12 → copy the config file for your OS
+(`config/mcp-servers.windows.json` / `.macos.json` / `.linux.json`) into your
 MCP client → install components one by one → run the acceptance task for each
 layer → finish with one cross-layer task.
 
