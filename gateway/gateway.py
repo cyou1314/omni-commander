@@ -535,6 +535,12 @@ async def can_desktop_screenshot(max_dim: int = 1600) -> CallToolResult:
     )
 
 
+@mcp.tool(annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=True, idempotentHint=False))
+async def can_desktop_batch(steps: list) -> str:
+    """Run a SEQUENCE of desktop actions in ONE call — much faster than calling the desktop tools one by one, because the whole sequence executes on the computer without a round trip per step. steps is a list of step objects: {"op":"open_app","name":"Notes"} | {"op":"snapshot","app":"Notes"} (refresh element refs; do this before clicking) | {"op":"click","ref":"d12"} or {"op":"click","label":"OK"} (label is matched against the latest snapshot in the same batch, so a full sequence can be planned in one call) | {"op":"type","text":"...","ref":"d12"} (ref/label optional) | {"op":"key","key":"return"} | {"op":"wait","ms":800}. Max 12 steps; execution stops at the first failing step and reports which steps completed. End with a snapshot step when you need to verify the final state. Prefer this tool whenever a task needs several desktop actions in a row."""
+    return await relay_tool("can_desktop_batch", {"steps": steps}, timeout=115)
+
+
 @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False, idempotentHint=True))
 async def can_audit_log(lines: int = 20) -> str:
     """Read the Can agent's local audit log on the owner's computer: every tool call and fence decision (executed / blocked / confirmed / denied), newest last. Read-only."""

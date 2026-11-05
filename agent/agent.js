@@ -53,7 +53,7 @@ const STARTED = Date.now();
 const LOG = path.join(DIR, "agent.log");
 const STATUS = path.join(DIR, "status.json");
 const WRITELOG = path.join(DIR, "write-log.txt");
-const AGENT_VERSION = "0.8.7";
+const AGENT_VERSION = "0.8.8";
 
 function log(msg) {
   const line = `[${new Date().toISOString()}] ${msg}\n`;
@@ -862,6 +862,66 @@ async function toolDesktopKey(args) {
   return JSON.stringify({ pressed: true, key });
 }
 
+// Run a whole sequence of desktop actions in ONE tool call, locally, without
+// a network/model round trip per step. This is the main speed lever for
+// multi-step desktop work: the model plans the sequence once, the agent
+// executes it end to end and returns per-step results plus the last snapshot.
+async function toolDesktopBatch(args) {
+  const steps = Array.isArray(args && args.steps) ? args.steps.slice(0, 12) : [];
+  if (!steps.length) throw new Error("steps must be a non-empty array");
+  const out = [];
+  let lastSnapshot = null;
+  // click/type steps may name an element by its visible label instead of a
+  // ref; resolve against the latest in-batch snapshot so the model can plan
+  // a whole sequence in one call without knowing refs in advance.
+  const resolveRef = (s) => {
+    if (s.ref) return s.ref;
+    if (!s.label || !lastSnapshot) return s.ref;
+    const els = lastSnapshot.elements || [];
+    const want = String(s.label);
+    const hit = els.find((e) => e.label === want) || els.find((e) => e.label && e.label.includes(want));
+    return hit ? hit.ref : s.ref;
+  };
+  for (let i = 0; i < steps.length; i++) {
+    const s = steps[i] || {};
+    const op = String(s.op || "");
+    try {
+      if (op === "open_app") {
+        const r = JSON.parse(await toolDesktopOpenApp({ name: s.name }));
+        out.push({ step: i, op, ok: true, pid: r.pid });
+      } else if (op === "snapshot") {
+        lastSnapshot = JSON.parse(await toolDesktopSnapshot(s));
+        out.push({ step: i, op, ok: true, count: lastSnapshot.count });
+      } else if (op === "click") {
+        const ref = resolveRef(s);
+        if (!ref) throw new Error("click step needs a ref or a label matching the last snapshot");
+        await toolDesktopClick({ ...s, ref });
+        out.push({ step: i, op, ok: true, ref });
+      } else if (op === "type") {
+        const ref = resolveRef(s);
+        await toolDesktopType(ref ? { ...s, ref } : s);
+        out.push({ step: i, op, ok: true, ref: ref || undefined });
+      } else if (op === "key") {
+        await toolDesktopKey(s);
+        out.push({ step: i, op, ok: true });
+      } else if (op === "wait") {
+        const ms = Math.min(Math.max(Number(s.ms) || 500, 0), 5000);
+        await new Promise((r) => setTimeout(r, ms));
+        out.push({ step: i, op, ok: true });
+      } else {
+        out.push({ step: i, op, ok: false, error: "unknown op: " + op });
+        break;
+      }
+    } catch (e) {
+      out.push({ step: i, op, ok: false, error: String((e && e.message) || e) });
+      break;
+    }
+  }
+  const res = { steps: out, completed: out.filter((x) => x.ok).length, total: steps.length };
+  if (lastSnapshot) res.final_snapshot = lastSnapshot;
+  return JSON.stringify(res);
+}
+
 // Convert a PNG screenshot to JPEG with macOS's built-in sips: same picture,
 // a fraction of the bytes. ChatGPT's conversation UI failed to render the
 // large PNG payloads the engine returns (broken placeholder / dropped image)
@@ -946,7 +1006,7 @@ const CONFIRM_DESKTOP = FENCE.confirmDesktop !== undefined ? FENCE.confirmDeskto
 const TRUST_WINDOW_MIN = Math.min(Math.max(Number(FENCE.trustWindowMin || 0), 0), 240);
 let trustUntil = 0;
 const DIALOG_TIMEOUT_S = Math.min(Math.max(Number(FENCE.dialogTimeoutS || 60), 10), 120);
-const SENSITIVE = new Set(["can_run_command", "can_ego_click", "can_ego_type", "can_desktop_click", "can_desktop_type", "can_desktop_key"]);
+const SENSITIVE = new Set(["can_run_command", "can_ego_click", "can_ego_type", "can_desktop_click", "can_desktop_type", "can_desktop_key", "can_desktop_batch"]);
 const sensitiveHits = [];
 
 function audit(tool, argsSum, decision, detail) {
@@ -1136,6 +1196,7 @@ async function execute(tool, args) {
     case "can_desktop_type": return toolDesktopType(args);
     case "can_desktop_key": return toolDesktopKey(args);
     case "can_desktop_screenshot": return toolDesktopScreenshot(args);
+    case "can_desktop_batch": return toolDesktopBatch(args);
     default: throw new Error("unknown tool: " + tool);
   }
 }
