@@ -45,7 +45,7 @@ const STARTED = Date.now();
 const LOG = path.join(DIR, "agent.log");
 const STATUS = path.join(DIR, "status.json");
 const WRITELOG = path.join(DIR, "write-log.txt");
-const AGENT_VERSION = "0.6.0";
+const AGENT_VERSION = "0.6.1";
 
 function log(msg) {
   const line = `[${new Date().toISOString()}] ${msg}\n`;
@@ -179,17 +179,22 @@ const BLOCKED = [
   /\bchmod\s+-R\b[^|;&]*\s\//,
 ];
 
+function blockedByPattern(command) {
+  for (const re of BLOCKED) {
+    if (re.test(command)) return true;
+  }
+  return false;
+}
+
 function toolRunCommand(args) {
   const command = String((args && args.command) || "");
   if (!command.trim()) throw new Error("empty command");
-  for (const re of BLOCKED) {
-    if (re.test(command)) {
-      return Promise.resolve(JSON.stringify({
-        error: "blocked_pattern",
-        detail: "This command matches a blocked catastrophic pattern and was not run.",
-        command,
-      }));
-    }
+  if (blockedByPattern(command)) {
+    return Promise.resolve(JSON.stringify({
+      error: "blocked_pattern",
+      detail: "This command matches a blocked catastrophic pattern and was not run.",
+      command,
+    }));
   }
   return new Promise((resolve) => {
     exec(command, {
@@ -652,6 +657,16 @@ function rateOk() {
 
 async function guardedExecute(tool, args) {
   const sum = argsSummary(tool, args);
+  // Hard blocks fire BEFORE any confirmation prompt: the owner is never
+  // asked to approve a command that would be refused anyway.
+  if (tool === "can_run_command" && blockedByPattern(String((args || {}).command || ""))) {
+    audit(tool, sum, "blocked_pattern");
+    return JSON.stringify({
+      error: "blocked_pattern",
+      detail: "This command matches a blocked catastrophic pattern and was not run.",
+      command: String((args || {}).command || ""),
+    });
+  }
   if (SENSITIVE.has(tool)) {
     const needsConfirm = tool === "can_run_command" ? CONFIRM_RUN : CONFIRM_EGO;
     if (needsConfirm) {
