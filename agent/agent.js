@@ -481,7 +481,7 @@ async function toolEgoSpaces() {
 
 async function toolEgoClaim(args) {
   const id = Number(args && args.space_id);
-  if (!Number.isFinite(id) || id <= 0) throw new Error("space_id must be a positive number from can_ego_spaces");
+  if (!Number.isFinite(id) || id < 0) throw new Error("space_id must be a number from can_ego_spaces");
   const script =
     `const task = await claimTaskSpace(${id});\n` +
     "let url = null, title = null;\n" +
