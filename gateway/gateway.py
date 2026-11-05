@@ -353,13 +353,20 @@ WIDGET_HTML = """<!doctype html>
 <html><head><meta charset="utf-8"><style>
 body{margin:0;font-family:-apple-system,system-ui,"Segoe UI",sans-serif;background:transparent}
 figure{margin:0}
-img{width:100%;height:auto;display:block;border-radius:8px;background:#f2f2f2}
+img{width:100%;height:auto;display:block;border-radius:8px;background:#f2f2f2;cursor:zoom-in}
+body.fs img{cursor:zoom-out}
 figcaption{padding:8px 2px 2px;font-size:13px;color:#6b7280}
 a{color:#2563eb;text-decoration:none}
 </style></head>
 <body>
-<figure><img id="shot" alt="Screenshot of the owner's computer screen"><figcaption id="cap">Loading screenshot...</figcaption></figure>
+<figure><img id="shot" alt="Screenshot of the owner's computer screen" title="Click to view fullscreen"><figcaption id="cap">Loading screenshot...</figcaption></figure>
 <script>
+function isFs(){ return (window.openai&&window.openai.displayMode)==='fullscreen'; }
+function applyMode(){ document.body.classList.toggle('fs',isFs()); var img=document.getElementById('shot'); img.title=isFs()?'Click to exit fullscreen':'Click to view fullscreen'; }
+function toggleFs(){
+  if(!(window.openai&&window.openai.requestDisplayMode)){ return; }
+  window.openai.requestDisplayMode({mode:isFs()?'inline':'fullscreen'});
+}
 function render(){
   var o=(window.openai&&window.openai.toolOutput)||{};
   var md=(window.openai&&window.openai.toolResponseMetadata)||{};
@@ -367,10 +374,12 @@ function render(){
   var url=o.image_url||'';var data=md['can/image_data']||'';
   img.onerror=function(){ if(data && img.src!==data){ img.src=data; } };
   if(url){ img.src=url; } else if(data){ img.src=data; }
+  img.onclick=toggleFs;
   var dims=(o.width&&o.height)?(o.width+'\\u00d7'+o.height):'';
-  cap.innerHTML='Screenshot of the owner\\'s screen'+(dims?' \\u00b7 '+dims:'')+(url?' \\u00b7 <a href="'+url+'" target="_blank" rel="noopener">Open full image</a>':'');
+  cap.innerHTML='Screenshot of the owner\\'s screen'+(dims?' \\u00b7 '+dims:'')+' \\u00b7 Click the image to enlarge'+(url?' \\u00b7 <a href="'+url+'" target="_blank" rel="noopener">Open full image</a>':'');
+  applyMode();
 }
-window.addEventListener('openai:set_globals',render);
+window.addEventListener('openai:set_globals',function(){ render(); });
 render();
 </script>
 </body></html>"""
