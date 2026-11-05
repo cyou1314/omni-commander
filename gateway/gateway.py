@@ -360,39 +360,39 @@ async def can_run_command(command: str) -> str:
 
 
 @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False, idempotentHint=True))
-async def can_chrome_tabs() -> str:
-    """List the tabs of the owner's REAL Chrome-family browser (Chrome/Edge/Brave/Arc with the Can extension loaded): tab_id, active flag, title, URL — the pages he actually has open. Read-only. Errors if the extension is not connected."""
-    return await relay_tool("can_chrome_tabs", {})
+async def can_desktop_windows(app: str = "") -> str:
+    """List open windows on the owner's computer (optionally filtered by app name): pid, window_id, app, title, on-screen flag. This is the desktop / UI-automation layer: it works on ANY app's window from the outside — including browsers like Chrome or Edge — without any plugin. Read-only."""
+    return await relay_tool("can_desktop_windows", {"app": app})
 
 
 @mcp.tool(annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=False, idempotentHint=False))
-async def can_chrome_open(url: str) -> str:
-    """Open a URL in a NEW tab in the owner's real Chrome-family browser (via the Can extension) and remember it as the current tab for snapshot/click/type."""
-    return await relay_tool("can_chrome_open", {"url": url})
+async def can_desktop_open_app(name: str) -> str:
+    """Open (launch in the background, without stealing focus) or surface an app on the owner's computer by name, e.g. "Calculator", "Google Chrome", "Notes". Returns its pid and windows; remember the window for snapshot/click/type."""
+    return await relay_tool("can_desktop_open_app", {"name": name}, timeout=60)
 
 
 @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False, idempotentHint=False))
-async def can_chrome_snapshot(tab_id: int = 0) -> str:
-    """Snapshot a tab in the owner's real browser: URL, title, visible text excerpt, and interactive elements with refs (e1, e2, ...). tab_id 0 = the current Can tab (last opened) or his active tab. Read-only."""
-    return await relay_tool("can_chrome_snapshot", {"tab_id": tab_id})
+async def can_desktop_snapshot(app: str = "", pid: int = 0, window_id: int = 0) -> str:
+    """Snapshot a window's interface as a list of elements with refs (d1, d2, ...): role, label, value. Identify the window by pid+window_id (from can_desktop_windows / can_desktop_open_app), or by app name, or leave all empty for the last window Can looked at. Take a FRESH snapshot before clicking or typing: refs die when a new snapshot is taken. Read-only. Works on any app, including a browser window — this is how Can operates browsers other than ego."""
+    return await relay_tool("can_desktop_snapshot", {"app": app, "pid": pid, "window_id": window_id}, timeout=60)
 
 
 @mcp.tool(annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=True, idempotentHint=False))
-async def can_chrome_click(ref: str, tab_id: int = 0) -> str:
-    """Click an element (ref from can_chrome_snapshot, e.g. "e3") in the owner's real browser. Fence: the owner must approve it in a dialog ON the computer itself; denied or unanswered returns an owner_denied error and nothing is clicked."""
-    return await relay_tool("can_chrome_click", {"ref": ref, "tab_id": tab_id}, timeout=115)
+async def can_desktop_click(ref: str, pid: int = 0, window_id: int = 0) -> str:
+    """Click an element (ref from can_desktop_snapshot, e.g. "d3") in a window on the owner's computer. Works in the background without stealing focus. Fence: the owner must approve it in a dialog ON the computer itself; denied or unanswered returns an owner_denied error and nothing is clicked."""
+    return await relay_tool("can_desktop_click", {"ref": ref, "pid": pid, "window_id": window_id}, timeout=115)
 
 
 @mcp.tool(annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=True, idempotentHint=False))
-async def can_chrome_type(ref: str, text: str, tab_id: int = 0) -> str:
-    """Fill a field (ref from can_chrome_snapshot) in the owner's real browser. Fence: the owner must approve it in a dialog ON the computer itself; denied or unanswered returns an owner_denied error and nothing is typed."""
-    return await relay_tool("can_chrome_type", {"ref": ref, "text": text, "tab_id": tab_id}, timeout=115)
+async def can_desktop_type(ref: str, text: str, pid: int = 0, window_id: int = 0) -> str:
+    """Type text into an element (ref from can_desktop_snapshot) in a window on the owner's computer. Fence: the owner must approve it in a dialog ON the computer itself; denied or unanswered returns an owner_denied error and nothing is typed."""
+    return await relay_tool("can_desktop_type", {"ref": ref, "text": text, "pid": pid, "window_id": window_id}, timeout=115)
 
 
-@mcp.tool(annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=False, idempotentHint=True))
-async def can_chrome_close(tab_id: int = 0) -> str:
-    """Close a tab in the owner's real browser (tab_id 0 = the current Can tab)."""
-    return await relay_tool("can_chrome_close", {"tab_id": tab_id})
+@mcp.tool(annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=True, idempotentHint=False))
+async def can_desktop_key(key: str, ref: str = "", pid: int = 0, window_id: int = 0) -> str:
+    """Press one key (return, tab, escape, space, delete, up/down/left/right, f1-f12, a letter or digit) in a window on the owner's computer, optionally targeting an element ref from can_desktop_snapshot. Fence: the owner must approve it in a dialog ON the computer itself; denied or unanswered returns an owner_denied error and no key is pressed."""
+    return await relay_tool("can_desktop_key", {"key": key, "ref": ref, "pid": pid, "window_id": window_id}, timeout=115)
 
 
 @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False, idempotentHint=True))
