@@ -84,6 +84,14 @@ it applies to whichever driver you use.
 Division of labour, write it down for your brain: **needs your login → ego;
 does not need login / must be reproducible → Playwright (Step 3).**
 
+> **Verified on the first test machine (macOS + Codex, 2026-11-05):**
+> whether a task Space carries your logins depends on **which profile it is
+> created under**, not on whether the ego window happens to be open. Create
+> task Spaces under the profile you actually browse with (the one holding
+> your daily Spaces); a Space created under a default or other profile
+> opens sites logged out. On the test machine the brain could use the
+> `ego-browser` skill straight from `~/.agents/skills`, no copying needed.
+
 **Accept:** the brain opens an isolated workspace in your logged-in browser
 (an ego Space, or the fallback driver's equivalent session), loads a site you
 are logged into, takes a semantic snapshot, finds a named button and clicks
@@ -97,6 +105,18 @@ client if you added it later.
 **Accept:** in a fresh (logged-out) browser, the brain opens a public page,
 fills a form, submits it, and reads the result back from a new snapshot.
 Actions must target snapshot refs, not coordinates.
+
+> **Verified on the first test machine (macOS + Codex, 2026-11-05):**
+> unlike Desktop Commander in Step 1, the `npx -y @playwright/mcp@latest`
+> form worked here — the `browser_*` tools appeared in a fresh session and
+> the browser launched with no separate install step. Acceptance run:
+> opened `https://the-internet.herokuapp.com/login` (a public demo site),
+> filled Username / Password through snapshot refs, clicked Login, and
+> read `You logged into a secure area!` back from the post-submit snapshot
+> at `/secure`; the browser was closed afterwards. Config backup before
+> the change: `config.toml.bak-omni-step3`. If the npx first-start
+> download ever stalls on another machine, fall back to the Step 1
+> fixed-install pattern instead of retrying npx.
 
 ## Step 4 — Cua Driver, the desktop layer
 
