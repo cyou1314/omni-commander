@@ -429,9 +429,14 @@ function runEgo(script, timeoutMs) {
     child.on("error", (e) => { clearTimeout(timer); reject(e); });
     child.on("close", (code) => {
       clearTimeout(timer);
-      const line = out.split("\n").find((l) => l.startsWith("CAN_RESULT "));
-      if (line) {
-        try { resolve(JSON.parse(line.slice("CAN_RESULT ".length))); return; }
+      // ego may route console output to either stream; find the marker
+      // anywhere in the combined output and parse to end of that line.
+      const combined = out + "\n" + err;
+      const idx = combined.indexOf("CAN_RESULT ");
+      if (idx >= 0) {
+        const rest = combined.slice(idx + "CAN_RESULT ".length);
+        const line = rest.split("\n")[0];
+        try { resolve(JSON.parse(line)); return; }
         catch (e) { /* fall through to error */ }
       }
       reject(new Error("ego failed (exit " + code + "): " + (err || out).slice(-600)));
