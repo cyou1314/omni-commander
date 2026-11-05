@@ -1,4 +1,4 @@
-# omni-commander V2 — web edition plan
+# Can — omni-commander V2 web edition plan
 
 Decided 2026-11-05. V1 (see `docs/SETUP.md`) proved the layers on one machine
 with a local brain. V2 turns that into the owner's own product, in the shape
@@ -9,8 +9,8 @@ see and control your own computer.**
 
 - The product is the owner's own: **his name, his icon** on every surface a
   user can see — gateway pages, the local agent app, the connector entry in
-  ChatGPT. Working name: `omni-commander` (chosen by the owner at V1 start;
-  he may rename before Step 0 closes).
+  ChatGPT. Product name: **Can** (chosen by the owner 2026-11-05; the
+  repository keeps the `omni-commander` name for now).
 - Third-party components may run *inside*, never as the product's face.
 
 ## Shape — three parts
@@ -35,8 +35,9 @@ see and control your own computer.**
 
 ## Steps (one at a time, each verified before the next)
 
-- **Step 0 — Name and icon.** Owner confirms the product name; icon
-  candidates are generated, owner picks. Every later surface uses them.
+- **Step 0 — Name and icon.** Product name confirmed: **Can**
+  (2026-11-05). Icon candidates are generated, owner picks. Every later
+  surface uses them.
 - **Step 1 — Web chain proof (the critical one).** Minimal gateway: branded
   login page + MCP endpoint + relay, registered as a custom connector in
   ChatGPT web, exposing exactly one harmless tool (report whether the
