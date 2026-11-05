@@ -32,6 +32,7 @@ State (registered clients, codes, tokens) persists to state.json so a
 gateway restart does not force re-registration. Single user: the owner.
 """
 import asyncio
+import base64
 import json
 import os
 import secrets
@@ -58,7 +59,7 @@ from mcp.shared.auth import OAuthClientInformationFull, OAuthToken
 from mcp.types import ImageContent, TextContent, ToolAnnotations
 from pydantic import AnyHttpUrl
 from starlette.requests import Request
-from starlette.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse
+from starlette.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse, Response
 
 BASE = Path(__file__).resolve().parent
 STATE_FILE = BASE / "state.json"
@@ -308,6 +309,37 @@ async def agent_result(request: Request):
     return JSONResponse({"ok": True})
 
 
+# --- Screenshot viewing links -------------------------------------------------
+# ChatGPT's conversation UI does not render MCP tool-result images (verified
+# repeatedly 2026-11-05: the model receives the image and describes the screen
+# accurately, but the user only sees a broken "Image unavailable" placeholder,
+# for PNG and JPEG alike). Workaround: the gateway keeps each screenshot in
+# memory for 10 minutes behind an unguessable token URL and the tool result
+# text carries the link for the user to open. In-memory only, never on disk.
+SHOTS: dict[str, tuple[bytes, str, float]] = {}
+SHOT_TTL = 600
+
+
+def stash_shot(img_bytes: bytes, mime: str) -> str:
+    now = time.time()
+    for tok in [t for t, (_, _, exp) in SHOTS.items() if exp < now]:
+        SHOTS.pop(tok, None)
+    while len(SHOTS) >= 5:
+        SHOTS.pop(next(iter(SHOTS)), None)
+    token = secrets.token_urlsafe(24)
+    SHOTS[token] = (img_bytes, mime, now + SHOT_TTL)
+    return f"{PUBLIC_URL}/shot/{token}"
+
+
+@mcp.custom_route("/shot/{token}", methods=["GET"])
+async def serve_shot(request: Request):
+    entry = SHOTS.get(request.path_params.get("token", ""))
+    if entry is None or entry[2] < time.time():
+        return JSONResponse({"error": "not found or expired"}, status_code=404)
+    img_bytes, mime, _ = entry
+    return Response(content=img_bytes, media_type=mime, headers={"Cache-Control": "no-store"})
+
+
 async def relay_tool(name: str, arguments: dict, timeout: float = 30.0) -> str:
     """Shared tool body: offline pre-check, relay to the agent, timeout."""
     log_line(TOOL_LOG, f"{time.strftime('%H:%M:%S')} CALL {name} args={arguments!r}")
@@ -406,14 +438,26 @@ async def can_desktop_screenshot(max_dim: int = 1600) -> list:
     b64 = data.get("screenshot_png_b64") if isinstance(data, dict) else None
     if not b64:
         return [TextContent(type="text", text=raw)]
+    mime = data.get("mime") or "image/png"
+    link = ""
+    try:
+        link = stash_shot(base64.b64decode(b64), mime)
+    except Exception:
+        link = ""
     summary = (
         f"Screenshot of the owner's computer screen "
         f"({data.get('screenshot_width')}x{data.get('screenshot_height')} image, "
         f"display {data.get('screen_width')}x{data.get('screen_height')})."
     )
+    if link:
+        summary += (
+            f" The attached image may not render in this chat UI; to let the user "
+            f"actually SEE the screenshot, include this viewing link in your reply "
+            f"exactly as written (valid 10 minutes): {link}"
+        )
     return [
         TextContent(type="text", text=summary),
-        ImageContent(type="image", data=b64, mimeType=data.get("mime") or "image/png"),
+        ImageContent(type="image", data=b64, mimeType=mime),
     ]
 
 
