@@ -22,6 +22,13 @@
  *                      daily browser; "user" space = the owner's own
  *                      space (the pages he has open), claimed on his
  *                      explicit request.
+ *   can_desktop_*   -> UI-automation layer over ANY app window, via
+ *                      the Cua Driver running as a private internal
+ *                      engine (spawned as `cua-driver mcp`, stdio):
+ *                      windows / open_app / snapshot (refs d1...) /
+ *                      click / type / key. Also the way Can operates
+ *                      browsers other than ego (snapshot the browser
+ *                      window, click its elements; no plugin).
  * File tools are confined to the work folder (config.workRoot):
  * absolute paths, ".." escapes and symlink escapes are refused.
  * can_run_command has a 30s timeout, capped output, and a blocklist
@@ -46,7 +53,7 @@ const STARTED = Date.now();
 const LOG = path.join(DIR, "agent.log");
 const STATUS = path.join(DIR, "status.json");
 const WRITELOG = path.join(DIR, "write-log.txt");
-const AGENT_VERSION = "0.7.0";
+const AGENT_VERSION = "0.8.0";
 
 function log(msg) {
   const line = `[${new Date().toISOString()}] ${msg}\n`;
@@ -572,143 +579,237 @@ async function toolEgoFinish() {
   return JSON.stringify(r);
 }
 
-/* ------------------------------------------- chrome-family ext backend */
-/* Browser universalization: a Can extension (extension/ in the repo)
- * loaded into ANY Chrome-family browser (Chrome / Edge / Brave / Arc)
- * bridges that real, running browser to this agent. Chrome spawns
- * ext-host.js (native messaging, com.can.agent); the host connects to
- * this agent's local bridge (TCP 127.0.0.1:18792, localhost only,
- * newline JSON). So Can can see and drive the tabs the owner actually
- * has open — including logged-in pages — in whichever Chromium
- * browser he uses daily. Click/type are fence-gated (see below). */
-const EXT_PORT = 18792;
-const EXT_STATE = path.join(DIR, "ext-state.json");
-let extSock = null;
-let extSeq = 0;
-const extPending = new Map();
+/* ------------------------------------------------- desktop (UI automation) */
+/* Desktop layer: Can drives ANY app's window from the outside via the
+ * Cua Driver, which runs INSIDE this agent as a private internal
+ * engine (the product surface stays Can; Cua is never exposed to the
+ * user or the brain). The agent spawns `cua-driver mcp` (stdio)
+ * lazily and speaks MCP/JSON-RPC to it over the child's pipes.
+ * Flow mirrors the other layers: list windows / open app -> snapshot
+ * (accessibility elements with refs d1, d2, ...) -> click / type /
+ * key by ref. Actions run in the background (no focus steal) and are
+ * fence-gated (see the fence section). This layer is also how Can
+ * operates browsers other than ego (e.g. Chrome): snapshot the
+ * browser's window and click its elements -- no plugin anywhere
+ * (the extension route was built, verified, then dropped on the
+ * owner's decision, 2026-11-05). */
+const CUA_BIN = cfg.cuaPath || "/Users/cyou/.local/bin/cua-driver";
+const CUA_SESSION = "can";
+let cuaChild = null;
+let cuaBuf = "";
+let cuaSeq = 0;
+const cuaPending = new Map();
+let cuaReady = null;
+let deskLast = null; // { pid, window_id, app, title }
+const deskSnaps = new Map(); // "pid:window_id" -> { tokens: Map<index, token> }
 
-const extServer = net.createServer((s) => {
-  if (extSock) { try { extSock.destroy(); } catch (e) {} }
-  extSock = s;
-  let buf = "";
-  s.on("data", (d) => {
-    buf += d.toString("utf8");
+function cuaSpawn() {
+  const child = spawn(CUA_BIN, ["mcp"], { stdio: ["pipe", "pipe", "pipe"] });
+  cuaChild = child;
+  cuaBuf = "";
+  child.stdout.on("data", (d) => {
+    cuaBuf += d.toString("utf8");
     let i;
-    while ((i = buf.indexOf("\n")) >= 0) {
-      const line = buf.slice(0, i);
-      buf = buf.slice(i + 1);
+    while ((i = cuaBuf.indexOf("\n")) >= 0) {
+      const line = cuaBuf.slice(0, i);
+      cuaBuf = cuaBuf.slice(i + 1);
       if (!line.trim()) continue;
       let m;
       try { m = JSON.parse(line); } catch (e) { continue; }
-      if (m.type === "hello") log("extension host connected");
-      if (m.type === "result" && extPending.has(m.id)) {
-        const p = extPending.get(m.id);
-        extPending.delete(m.id);
-        if (m.ok) p.resolve(m.result);
-        else p.reject(new Error(m.error || "extension error"));
+      if (m.id !== undefined && cuaPending.has(m.id)) {
+        const p = cuaPending.get(m.id);
+        cuaPending.delete(m.id);
+        if (m.error) p.reject(new Error("cua: " + String((m.error && m.error.message) || JSON.stringify(m.error)).slice(0, 300)));
+        else p.resolve(m.result);
       }
     }
   });
+  child.stderr.on("data", () => {});
   const drop = () => {
-    if (extSock === s) extSock = null;
-    for (const [id, p] of extPending) {
-      extPending.delete(id);
-      p.reject(new Error("extension disconnected"));
-    }
+    if (cuaChild === child) { cuaChild = null; cuaReady = null; }
+    deskSnaps.clear();
+    for (const [id, p] of cuaPending) { cuaPending.delete(id); p.reject(new Error("cua driver exited")); }
   };
-  s.on("close", drop);
-  s.on("error", drop);
-});
-extServer.listen(EXT_PORT, "127.0.0.1", () => log(`extension bridge on 127.0.0.1:${EXT_PORT}`));
-extServer.on("error", (e) => log(`extension bridge error: ${e.message}`));
+  child.on("exit", drop);
+  child.on("error", drop);
+  cuaReady = (async () => {
+    const r = await cuaRequest("initialize", {
+      protocolVersion: "2024-11-05", capabilities: {},
+      clientInfo: { name: "can-agent", version: AGENT_VERSION },
+    });
+    try { child.stdin.write(JSON.stringify({ jsonrpc: "2.0", method: "notifications/initialized" }) + "\n"); } catch (e) {}
+    log("cua driver connected (internal desktop engine)");
+    return r;
+  })();
+  return cuaReady;
+}
 
-function extCall(cmd, args, timeoutMs) {
+function cuaRequest(method, params) {
   return new Promise((resolve, reject) => {
-    if (!extSock) {
-      return reject(new Error("chrome extension not connected: load the Can extension in the browser (chrome://extensions) and click its icon once"));
-    }
-    const id = ++extSeq;
-    const timer = setTimeout(() => {
-      extPending.delete(id);
-      reject(new Error("extension call timed out: " + cmd));
-    }, timeoutMs || 45000);
-    extPending.set(id, {
+    if (!cuaChild || !cuaChild.stdin.writable) return reject(new Error("cua driver not running"));
+    const id = ++cuaSeq;
+    const timer = setTimeout(() => { cuaPending.delete(id); reject(new Error("cua call timed out: " + method)); }, 60000);
+    cuaPending.set(id, {
       resolve: (v) => { clearTimeout(timer); resolve(v); },
       reject: (e) => { clearTimeout(timer); reject(e); },
     });
-    extSock.write(JSON.stringify({ type: "call", id, cmd, args: args || {} }) + "\n");
+    cuaChild.stdin.write(JSON.stringify({ jsonrpc: "2.0", id, method, params: params || {} }) + "\n");
   });
 }
 
-function extState() {
-  try { return JSON.parse(fs.readFileSync(EXT_STATE, "utf8")); } catch (e) { return {}; }
-}
-function saveExtState(s) {
-  try { fs.writeFileSync(EXT_STATE, JSON.stringify(s)); } catch (e) {}
-}
-
-async function extTabId(args) {
-  if (args && args.tab_id) return Number(args.tab_id);
-  const st = extState();
-  if (st.tabId) return st.tabId;
-  const tabs = await extCall("tabs", {});
-  const act = tabs.find((t) => t.active) || tabs[0];
-  if (!act) throw new Error("no tabs open in the browser");
-  return act.id;
+function cuaText(result) {
+  try {
+    const parts = (result && result.content) || [];
+    for (const p of parts) if (p && p.type === "text" && p.text) return p.text;
+  } catch (e) {}
+  return "";
 }
 
-async function toolChromeTabs() {
-  const tabs = await extCall("tabs", {});
+async function cuaCall(name, args) {
+  if (!cuaChild) cuaSpawn();
+  await cuaReady;
+  const result = await cuaRequest("tools/call", {
+    name, arguments: Object.assign({ session: CUA_SESSION }, args || {}),
+  });
+  if (result && result.isError) throw new Error(cuaText(result) || ("cua tool failed: " + name));
+  if (result && result.structuredContent) return result.structuredContent;
+  const text = cuaText(result);
+  if (text) { try { return JSON.parse(text); } catch (e) { return { text }; } }
+  return result || {};
+}
+
+async function cuaListWindows(app) {
+  const r = await cuaCall("list_windows", app ? { app } : {});
+  const wins = Array.isArray(r) ? r : (r.windows || []);
+  return Array.isArray(wins) ? wins : [];
+}
+
+function deskKey(pid, wid) { return pid + ":" + wid; }
+
+async function deskResolveWindow(args) {
+  const a = args || {};
+  if (a.pid && a.window_id) {
+    return { pid: Number(a.pid), window_id: Number(a.window_id), app: "", title: "" };
+  }
+  if (a.app) {
+    const wins = await cuaListWindows(String(a.app));
+    if (!wins.length) throw new Error("no open window found for app: " + a.app);
+    const w = wins.find((x) => x.is_on_screen) || wins[0];
+    return { pid: w.pid, window_id: w.window_id, app: w.app_name || String(a.app), title: w.title || "" };
+  }
+  if (deskLast) return deskLast;
+  throw new Error("no window selected yet: call can_desktop_windows, can_desktop_open_app, or can_desktop_snapshot with an app name first");
+}
+
+async function toolDesktopWindows(args) {
+  const wins = await cuaListWindows((args && args.app) || "");
   return JSON.stringify({
-    connected: true, count: tabs.length,
-    tabs: tabs.map((t) => ({
-      tab_id: t.id, active: Boolean(t.active),
-      title: String(t.title || "").slice(0, 120), url: t.url || "",
+    count: wins.length,
+    windows: wins.slice(0, 60).map((w) => ({
+      pid: w.pid, window_id: w.window_id,
+      app: w.app_name || w.app || "", title: String(w.title || "").slice(0, 120),
+      on_screen: Boolean(w.is_on_screen),
     })),
   });
 }
 
-async function toolChromeOpen(args) {
-  const url = String((args && args.url) || "");
-  if (!/^https?:\/\//i.test(url)) throw new Error("url must start with http:// or https://");
-  const r = await extCall("open", { url }, 60000);
-  const st = extState();
-  st.tabId = r.tabId;
-  saveExtState(st);
-  return JSON.stringify({ opened: true, tab_id: r.tabId, url: r.url || url, title: r.title || "" });
-}
-
-async function toolChromeSnapshot(args) {
-  const tabId = await extTabId(args);
-  const snap = await extCall("snapshot", { tabId });
+async function toolDesktopOpenApp(args) {
+  const name = String((args && args.name) || "").trim();
+  if (!name) throw new Error("name is required (e.g. Calculator, Google Chrome, Notes)");
+  const r = await cuaCall("launch_app", { name });
+  let wins = Array.isArray(r.windows) ? r.windows : [];
+  const pid = r.pid || (wins[0] && wins[0].pid) || 0;
+  if (!wins.length && pid) {
+    const all = await cuaListWindows("");
+    wins = all.filter((w) => w.pid === pid);
+  }
+  const w = wins.find((x) => x.is_on_screen) || wins[0];
+  if (w) deskLast = { pid: w.pid, window_id: w.window_id, app: name, title: w.title || "" };
   return JSON.stringify({
-    tab_id: tabId, url: snap.url, title: snap.title,
-    elements: snap.elements, text: snap.text,
+    launched: true, app: name, pid,
+    windows: wins.map((x) => ({
+      pid: x.pid, window_id: x.window_id,
+      title: String(x.title || "").slice(0, 120), on_screen: Boolean(x.is_on_screen),
+    })),
   });
 }
 
-async function toolChromeClick(args) {
-  const tabId = await extTabId(args);
-  const ref = String((args && args.ref) || "");
-  if (!/^e\d+$/.test(ref)) throw new Error("ref must come from can_chrome_snapshot (e.g. e3)");
-  const r = await extCall("click", { tabId, ref });
-  return JSON.stringify({ clicked: true, tab_id: tabId, ref, url: (r && r.url) || "" });
+async function toolDesktopSnapshot(args) {
+  const win = await deskResolveWindow(args);
+  const r = await cuaCall("get_window_state", {
+    pid: win.pid, window_id: win.window_id,
+    tree_format: "elements", include_screenshot: false,
+  });
+  const els = Array.isArray(r.elements) ? r.elements : [];
+  const tokens = new Map();
+  const out = [];
+  for (const el of els) {
+    if (el.element_index === undefined || !el.element_token) continue;
+    tokens.set(Number(el.element_index), el.element_token);
+    out.push({
+      ref: "d" + el.element_index,
+      role: String(el.role || "").slice(0, 40),
+      label: String(el.label || "").slice(0, 120),
+      value: el.value === undefined || el.value === null ? "" : String(el.value).slice(0, 120),
+    });
+  }
+  deskSnaps.set(deskKey(win.pid, win.window_id), { tokens });
+  deskLast = {
+    pid: win.pid, window_id: win.window_id,
+    app: win.app || (deskLast && deskLast.app) || "",
+    title: win.title || (deskLast && deskLast.title) || "",
+  };
+  return JSON.stringify({
+    window: { pid: win.pid, window_id: win.window_id, app: deskLast.app, title: deskLast.title },
+    count: out.length, truncated: Boolean(r.truncated),
+    elements: out,
+  });
 }
 
-async function toolChromeType(args) {
-  const tabId = await extTabId(args);
+async function deskResolveAction(args) {
+  const win = await deskResolveWindow(args);
   const ref = String((args && args.ref) || "");
-  if (!/^e\d+$/.test(ref)) throw new Error("ref must come from can_chrome_snapshot (e.g. e3)");
-  await extCall("type", { tabId, ref, text: String((args && args.text) || "") });
-  return JSON.stringify({ typed: true, tab_id: tabId, ref });
+  if (!/^d\d+$/.test(ref)) throw new Error("ref must come from can_desktop_snapshot (e.g. d3)");
+  const snap = deskSnaps.get(deskKey(win.pid, win.window_id));
+  if (!snap) throw new Error("no snapshot for this window yet: call can_desktop_snapshot first");
+  const token = snap.tokens.get(Number(ref.slice(1)));
+  if (!token) throw new Error("ref " + ref + " is not in the latest snapshot of this window; take a fresh snapshot");
+  return { win, token };
 }
 
-async function toolChromeClose(args) {
-  const tabId = await extTabId(args);
-  await extCall("close", { tabId });
-  const st = extState();
-  if (st.tabId === tabId) { delete st.tabId; saveExtState(st); }
-  return JSON.stringify({ closed: true, tab_id: tabId });
+async function toolDesktopClick(args) {
+  const { win, token } = await deskResolveAction(args);
+  await cuaCall("click", { pid: win.pid, window_id: win.window_id, element_token: token, action: "press" });
+  return JSON.stringify({ clicked: true, ref: args.ref, window: { pid: win.pid, window_id: win.window_id } });
+}
+
+async function toolDesktopType(args) {
+  const { win, token } = await deskResolveAction(args);
+  const text = String((args && args.text) || "");
+  try {
+    await cuaCall("type_text", { pid: win.pid, window_id: win.window_id, element_token: token, text });
+  } catch (e) {
+    // Some elements only accept a direct value write.
+    await cuaCall("set_value", { pid: win.pid, window_id: win.window_id, element_token: token, value: text });
+  }
+  return JSON.stringify({ typed: true, ref: args.ref });
+}
+
+async function toolDesktopKey(args) {
+  const win = await deskResolveWindow(args);
+  const key = String((args && args.key) || "").trim().toLowerCase();
+  if (!key) throw new Error("key is required (e.g. return, tab, escape)");
+  const callArgs = { pid: win.pid, window_id: win.window_id, key };
+  const ref = String((args && args.ref) || "");
+  if (ref) {
+    if (!/^d\d+$/.test(ref)) throw new Error("ref must come from can_desktop_snapshot (e.g. d3)");
+    const snap = deskSnaps.get(deskKey(win.pid, win.window_id));
+    const token = snap && snap.tokens.get(Number(ref.slice(1)));
+    if (!token) throw new Error("ref " + ref + " is not in the latest snapshot of this window; take a fresh snapshot");
+    callArgs.element_token = token;
+  }
+  await cuaCall("press_key", callArgs);
+  return JSON.stringify({ pressed: true, key });
 }
 
 /* ------------------------------------------------------------ the fence */
@@ -728,7 +829,7 @@ const FENCE = (cfg.fence && typeof cfg.fence === "object") ? cfg.fence : {};
 const CONFIRM_EGO = FENCE.confirmEgo !== false;
 const CONFIRM_RUN = FENCE.confirmRun !== false;
 const DIALOG_TIMEOUT_S = Math.min(Math.max(Number(FENCE.dialogTimeoutS || 60), 10), 120);
-const SENSITIVE = new Set(["can_run_command", "can_ego_click", "can_ego_type", "can_chrome_click", "can_chrome_type"]);
+const SENSITIVE = new Set(["can_run_command", "can_ego_click", "can_ego_type", "can_desktop_click", "can_desktop_type", "can_desktop_key"]);
 const sensitiveHits = [];
 
 function audit(tool, argsSum, decision, detail) {
@@ -748,8 +849,9 @@ function argsSummary(tool, args) {
     else if (tool === "can_read_file" || tool === "can_write_file" || tool === "can_list_files") s = String(a.path || "");
     else if (tool === "can_browser_open" || tool === "can_ego_open") s = String(a.url || "");
     else if (tool === "can_ego_click" || tool === "can_ego_type") s = `${a.space || "can"} ${a.target || ""} ${a.text || ""}`;
-    else if (tool === "can_chrome_click" || tool === "can_chrome_type") s = `tab ${a.tab_id || ""} ${a.ref || ""} ${a.text || ""}`;
-    else if (tool === "can_chrome_open") s = String(a.url || "");
+    else if (tool === "can_desktop_click" || tool === "can_desktop_type" || tool === "can_desktop_key") s = `${a.ref || ""} ${a.key || ""} ${a.text || ""} pid=${a.pid || ""} win=${a.window_id || ""}`;
+    else if (tool === "can_desktop_open_app") s = String(a.name || "");
+    else if (tool === "can_desktop_snapshot" || tool === "can_desktop_windows") s = String(a.app || "");
     else if (tool === "can_browser_click" || tool === "can_browser_type") s = `${a.ref || ""} ${a.text || ""}`;
     else if (tool === "can_ego_claim") s = `space ${a.space_id}`;
     else if (tool === "can_write_note") s = String(a.text || "");
@@ -788,11 +890,14 @@ function sensitiveSummary(tool, args) {
   if (tool === "can_ego_type") {
     return `Can 想在你的日常浏览器（${where}）中输入：\n目标 ${String(a.target || "").slice(0, 60)}\n内容「${String(a.text || "").slice(0, 40)}」`;
   }
-  if (tool === "can_chrome_click") {
-    return "Can 想在你的 Chrome 系浏览器中点击：\n" + String(a.ref || "").slice(0, 60);
+  if (tool === "can_desktop_click") {
+    return "Can 想在一个应用窗口里点击元素：\n" + String(a.ref || "").slice(0, 60);
   }
-  if (tool === "can_chrome_type") {
-    return `Can 想在你的 Chrome 系浏览器中输入：\n目标 ${String(a.ref || "").slice(0, 60)}\n内容「${String(a.text || "").slice(0, 40)}」`;
+  if (tool === "can_desktop_type") {
+    return `Can 想在一个应用窗口里输入：\n目标 ${String(a.ref || "").slice(0, 60)}\n内容「${String(a.text || "").slice(0, 40)}」`;
+  }
+  if (tool === "can_desktop_key") {
+    return "Can 想在一个应用窗口里按键：\n" + String(a.key || "").slice(0, 40);
   }
   return tool;
 }
@@ -902,12 +1007,12 @@ async function execute(tool, args) {
     case "can_ego_type": return toolEgoType(args);
     case "can_ego_finish": return toolEgoFinish();
     case "can_audit_log": return toolAuditLog(args);
-    case "can_chrome_tabs": return toolChromeTabs();
-    case "can_chrome_open": return toolChromeOpen(args);
-    case "can_chrome_snapshot": return toolChromeSnapshot(args);
-    case "can_chrome_click": return toolChromeClick(args);
-    case "can_chrome_type": return toolChromeType(args);
-    case "can_chrome_close": return toolChromeClose(args);
+    case "can_desktop_windows": return toolDesktopWindows(args);
+    case "can_desktop_open_app": return toolDesktopOpenApp(args);
+    case "can_desktop_snapshot": return toolDesktopSnapshot(args);
+    case "can_desktop_click": return toolDesktopClick(args);
+    case "can_desktop_type": return toolDesktopType(args);
+    case "can_desktop_key": return toolDesktopKey(args);
     default: throw new Error("unknown tool: " + tool);
   }
 }
