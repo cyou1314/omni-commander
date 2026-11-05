@@ -355,8 +355,14 @@ async def can_write_file(path: str, content: str) -> str:
 
 @mcp.tool(annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=True, idempotentHint=False))
 async def can_run_command(command: str) -> str:
-    """Run a shell command on the owner's computer, inside the Can work folder, and return its exit code and output. This EXECUTES on the computer."""
-    return await relay_tool("can_run_command", {"command": command})
+    """Run a shell command on the owner's computer, inside the Can work folder, and return its exit code and output. This EXECUTES on the computer. Fence: the owner must approve it in a dialog ON the computer itself; if he denies it or does not answer, the result is an owner_denied error and nothing runs."""
+    return await relay_tool("can_run_command", {"command": command}, timeout=115)
+
+
+@mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False, idempotentHint=True))
+async def can_audit_log(lines: int = 20) -> str:
+    """Read the Can agent's local audit log on the owner's computer: every tool call and fence decision (executed / blocked / confirmed / denied), newest last. Read-only."""
+    return await relay_tool("can_audit_log", {"lines": lines})
 
 
 @mcp.tool(annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=False, idempotentHint=False))
@@ -423,13 +429,13 @@ async def can_ego_snapshot(space: str = "can") -> str:
 
 @mcp.tool(annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=True, idempotentHint=False))
 async def can_ego_click(space: str, target: str) -> str:
-    """Click an element in the owner's daily browser: space is "can" or "user"; target is a snapshot ref (e.g. "@21") or a selector like text=..., loc=role:button[name='...']. This ACTS in the owner's logged-in browser."""
+    """Click an element in the owner's daily browser: space is "can" or "user"; target is a snapshot ref (e.g. "@21") or a selector like text=..., loc=role:button[name='...']. This ACTS in the owner's logged-in browser. Fence: the owner must approve it in a dialog ON the computer itself; denied or unanswered returns an owner_denied error and nothing is clicked."""
     return await relay_tool("can_ego_click", {"space": space, "target": target}, timeout=EGO_TIMEOUT)
 
 
 @mcp.tool(annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=True, idempotentHint=False))
 async def can_ego_type(space: str, target: str, text: str) -> str:
-    """Fill a field in the owner's daily browser: space is "can" or "user"; target is a snapshot ref (e.g. "@21") or a selector. This ACTS in the owner's logged-in browser."""
+    """Fill a field in the owner's daily browser: space is "can" or "user"; target is a snapshot ref (e.g. "@21") or a selector. This ACTS in the owner's logged-in browser. Fence: the owner must approve it in a dialog ON the computer itself; denied or unanswered returns an owner_denied error and nothing is typed."""
     return await relay_tool("can_ego_type", {"space": space, "target": target, "text": text}, timeout=EGO_TIMEOUT)
 
 

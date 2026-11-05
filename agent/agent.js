@@ -24,14 +24,15 @@
  *                      explicit request.
  * File tools are confined to the work folder (config.workRoot):
  * absolute paths, ".." escapes and symlink escapes are refused.
- * can_run_command has a 30s timeout, capped output, and a starter
- * blocklist of catastrophic patterns; the full stop-list fence
- * (delete/publish/overwrite confirmations) is Step 4's work.
+ * can_run_command has a 30s timeout, capped output, and a blocklist
+ * of catastrophic patterns. Step 4 fence (below, before dispatch):
+ * sensitive tools need the owner's click on a native Mac dialog,
+ * and every call is written to audit.log.
  */
 const fs = require("fs");
 const os = require("os");
 const path = require("path");
-const { execFileSync, exec, spawn } = require("child_process");
+const { execFileSync, exec, execFile, spawn } = require("child_process");
 
 const DIR = __dirname;
 const cfg = JSON.parse(fs.readFileSync(path.join(DIR, "config.json"), "utf8"));
@@ -44,7 +45,7 @@ const STARTED = Date.now();
 const LOG = path.join(DIR, "agent.log");
 const STATUS = path.join(DIR, "status.json");
 const WRITELOG = path.join(DIR, "write-log.txt");
-const AGENT_VERSION = "0.5.0";
+const AGENT_VERSION = "0.6.0";
 
 function log(msg) {
   const line = `[${new Date().toISOString()}] ${msg}\n`;
@@ -162,11 +163,20 @@ function toolWriteFile(args) {
 const BLOCKED = [
   /(^|[;&|]\s*)sudo\b/,
   /rm\s+-[a-z]*r[a-z]*f|rm\s+-[a-z]*f[a-z]*r/,
+  /rm\s+(-[a-zA-Z]+\s+)+(\/|~|\$HOME)/,
   /\bmkfs\b|\bdd\s+[^|]*\bif=/,
   /\bshutdown\b|\breboot\b|\bpoweroff\b|\bhalt\b/,
   /:\(\)\s*\{/,
   />\s*\/dev\/(sd|disk|rdisk)/,
-  /launchctl\s+(bootout|unload)\b[^|]*can/i,
+  />\s*\/(etc|System|usr|bin|sbin|Library)\//,
+  /launchctl\s+(bootout|unload)\b/,
+  /\|\s*(sudo\s+)?(sh|bash|zsh)\b/,
+  /\bosascript\b/,
+  /\bdiskutil\s+(erase|zero|secureErase|reformat)\b/,
+  /\bkillall\b|\bpkill\b/,
+  /\bdefaults\s+delete\b|\bnvram\b|\bcsrutil\b|\bspctl\b/,
+  /\bchown\s+-R\b[^|;&]*\s\//,
+  /\bchmod\s+-R\b[^|;&]*\s\//,
 ];
 
 function toolRunCommand(args) {
@@ -556,6 +566,144 @@ async function toolEgoFinish() {
   return JSON.stringify(r);
 }
 
+/* ------------------------------------------------------------ the fence */
+/* Step 4. Three layers, all enforced HERE on the owner's computer:
+ * 1) Hard blocks: catastrophic command patterns never run (BLOCKED).
+ * 2) Owner confirmation: sensitive tools (can_run_command, ego click /
+ *    type in the logged-in daily browser) pop a native dialog ON THIS
+ *    MAC; the action runs only if the owner clicks 允许. Deny, cancel
+ *    and timeout all fail closed. A remote brain cannot bypass it.
+ * 3) Audit: every tool call and fence decision is appended to
+ *    audit.log as a JSON line; can_audit_log reads it back.
+ * Config (config.json "fence"): confirmEgo / confirmRun default true,
+ * dialogTimeoutS defaults 60. Plus a light rate limit: 30 confirmed
+ * sensitive actions per hour. */
+const AUDIT = path.join(DIR, "audit.log");
+const FENCE = (cfg.fence && typeof cfg.fence === "object") ? cfg.fence : {};
+const CONFIRM_EGO = FENCE.confirmEgo !== false;
+const CONFIRM_RUN = FENCE.confirmRun !== false;
+const DIALOG_TIMEOUT_S = Math.min(Math.max(Number(FENCE.dialogTimeoutS || 60), 10), 120);
+const SENSITIVE = new Set(["can_run_command", "can_ego_click", "can_ego_type"]);
+const sensitiveHits = [];
+
+function audit(tool, argsSum, decision, detail) {
+  const line = JSON.stringify({
+    ts: new Date().toISOString(), tool, args: argsSum, decision,
+    detail: detail || "",
+  }) + "\n";
+  try { fs.appendFileSync(AUDIT, line); } catch (e) {}
+  log(`audit ${tool} -> ${decision}`);
+}
+
+function argsSummary(tool, args) {
+  try {
+    const a = args || {};
+    let s = "";
+    if (tool === "can_run_command") s = String(a.command || "");
+    else if (tool === "can_read_file" || tool === "can_write_file" || tool === "can_list_files") s = String(a.path || "");
+    else if (tool === "can_browser_open" || tool === "can_ego_open") s = String(a.url || "");
+    else if (tool === "can_ego_click" || tool === "can_ego_type") s = `${a.space || "can"} ${a.target || ""} ${a.text || ""}`;
+    else if (tool === "can_browser_click" || tool === "can_browser_type") s = `${a.ref || ""} ${a.text || ""}`;
+    else if (tool === "can_ego_claim") s = `space ${a.space_id}`;
+    else if (tool === "can_write_note") s = String(a.text || "");
+    else if (tool === "can_ego_snapshot") s = String(a.space || "can");
+    else s = JSON.stringify(a);
+    return s.replace(/\s+/g, " ").slice(0, 200);
+  } catch (e) { return ""; }
+}
+
+function macConfirm(summary) {
+  return new Promise((resolve) => {
+    const script = [
+      "on run argv",
+      "set msg to item 1 of argv",
+      `display dialog msg with title "Can 需要你确认" buttons {"拒绝", "允许"} default button "拒绝" cancel button "拒绝" with icon caution giving up after ${DIALOG_TIMEOUT_S}`,
+      "end run",
+    ].join("\n");
+    execFile("osascript", ["-e", script, "--", summary],
+      { timeout: (DIALOG_TIMEOUT_S + 15) * 1000 }, (err, stdout) => {
+        if (err) return resolve(false);
+        const out = String(stdout || "");
+        resolve(/button returned:\s*允许/.test(out) && !/gave up:\s*true/.test(out));
+      });
+  });
+}
+
+function sensitiveSummary(tool, args) {
+  const a = args || {};
+  if (tool === "can_run_command") {
+    return "Can 想在这台电脑的工作文件夹里执行命令：\n" + String(a.command || "").slice(0, 300);
+  }
+  const where = a.space === "user" ? "你自己的浏览器空间" : "Can 的浏览器空间";
+  if (tool === "can_ego_click") {
+    return `Can 想在你的日常浏览器（${where}）中点击：\n` + String(a.target || "").slice(0, 120);
+  }
+  if (tool === "can_ego_type") {
+    return `Can 想在你的日常浏览器（${where}）中输入：\n目标 ${String(a.target || "").slice(0, 60)}\n内容「${String(a.text || "").slice(0, 40)}」`;
+  }
+  return tool;
+}
+
+function rateOk() {
+  const now = Date.now();
+  while (sensitiveHits.length && now - sensitiveHits[0] > 3600000) sensitiveHits.shift();
+  return sensitiveHits.length < 30;
+}
+
+async function guardedExecute(tool, args) {
+  const sum = argsSummary(tool, args);
+  if (SENSITIVE.has(tool)) {
+    const needsConfirm = tool === "can_run_command" ? CONFIRM_RUN : CONFIRM_EGO;
+    if (needsConfirm) {
+      if (!rateOk()) {
+        audit(tool, sum, "rate_limited");
+        return JSON.stringify({
+          error: "rate_limited",
+          detail: "Too many sensitive actions in the last hour; the fence paused them. Try again later.",
+        });
+      }
+      audit(tool, sum, "confirmation_requested");
+      const ok = await macConfirm(sensitiveSummary(tool, args));
+      if (!ok) {
+        audit(tool, sum, "owner_denied_or_timeout");
+        return JSON.stringify({
+          error: "owner_denied",
+          detail: "The owner did not approve this action on the computer (denied, or no answer before the timeout). Nothing was executed.",
+        });
+      }
+      audit(tool, sum, "owner_confirmed");
+    }
+  }
+  try {
+    const result = await execute(tool, args);
+    let decision = "executed";
+    try {
+      const p = JSON.parse(result);
+      if (p && p.error === "blocked_pattern") decision = "blocked_pattern";
+    } catch (e) {}
+    audit(tool, sum, decision);
+    if (SENSITIVE.has(tool)) sensitiveHits.push(Date.now());
+    return result;
+  } catch (e) {
+    audit(tool, sum, "error", String(e && e.message || e).slice(0, 200));
+    throw e;
+  }
+}
+
+async function toolAuditLog(args) {
+  const n = Math.min(Math.max(Number((args && args.lines) || 20), 1), 100);
+  let lines = [];
+  try {
+    lines = fs.readFileSync(AUDIT, "utf8").split("\n").filter((l) => l.trim());
+  } catch (e) {}
+  return JSON.stringify({
+    total: lines.length,
+    entries: lines.slice(-n).map((l) => {
+      try { return JSON.parse(l); } catch (e) { return { raw: l }; }
+    }),
+  });
+}
+
 /* ------------------------------------------------------------ dispatch */
 async function execute(tool, args) {
   switch (tool) {
@@ -590,6 +738,7 @@ async function execute(tool, args) {
     case "can_ego_click": return toolEgoClick(args);
     case "can_ego_type": return toolEgoType(args);
     case "can_ego_finish": return toolEgoFinish();
+    case "can_audit_log": return toolAuditLog(args);
     default: throw new Error("unknown tool: " + tool);
   }
 }
@@ -602,7 +751,7 @@ async function pollOnce() {
   if (!job || !job.job_id) return;
   log(`job ${job.job_id} tool=${job.tool} args=${JSON.stringify(job.arguments || {}).slice(0, 200)}`);
   let ok = true, result;
-  try { result = await execute(job.tool, job.arguments || {}); }
+  try { result = await guardedExecute(job.tool, job.arguments || {}); }
   catch (e) { ok = false; result = String(e && e.message || e); }
   await api("POST", "/agent/result", { job_id: job.job_id, ok, result }, 10000);
   writeStatus("connected", { last_job: { tool: job.tool, at: new Date().toISOString(), ok } });
