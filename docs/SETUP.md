@@ -39,10 +39,33 @@ the paths, and put it in your client's MCP config.
 
 Restart the client.
 
+> **Recommended: fixed install instead of npx-on-demand (verified on the
+> first test machine, macOS + Codex, 2026-11-05).** The `npx -y …@latest`
+> form downloads the package the first time the server starts; on the test
+> machine that download stalled indefinitely (the npx cache held only a
+> lock file) and the tools never appeared. What passed instead:
+>
+> ```bash
+> mkdir -p ~/commander-tools/desktop-commander && cd ~/commander-tools/desktop-commander
+> npm init -y && npm install @wonderwhy-er/desktop-commander@latest
+> ```
+>
+> then register the server as `command = <abs path to node>`,
+> `args = ["<abs path>/node_modules/@wonderwhy-er/desktop-commander/dist/index.js"]`.
+> No per-start download, and the version is pinned by the lock file.
+> Two traps seen on the test machine: (1) `npm`'s own scripts resolve
+> `node` through `env`, so when the brain's terminal lacks Node on PATH the
+> install dies with `env: node: No such file or directory` — prefix the
+> command with `PATH=<node bin dir>:$PATH`; (2) the install pulls in
+> Puppeteer's browser download (~180 MB), so first install takes minutes,
+> not seconds — judge it by the lock file appearing, not by silence.
+
 **Accept:** in a fresh session, ask the brain to (1) create a file in your
 allowlisted folder, write one line, read it back; (2) run a harmless terminal
 command such as `ls`. Both must succeed. Then set Desktop Commander's
-`allowedDirectories` to that folder only (its `set_config_value` tool).
+`allowedDirectories` to that folder only (its `set_config_value` tool), and
+prove the fence: reading a file *outside* the allowlist must be refused
+(on the test machine: `Path not allowed`).
 
 ## Step 2 — ego, the logged-in browser (install once, verify here)
 
