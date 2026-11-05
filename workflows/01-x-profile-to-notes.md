@@ -37,7 +37,11 @@ profile page does not show them, stop and report — do not guess.
 2. Read the file back and compare against the leg-1 values.
 3. Rename it to `step6-x-profile-done.txt`. If a file of that name exists
    from an earlier run of this workflow, replace it — it is this workflow's
-   own artefact.
+   own artefact. Note: replacing removes the previous run's file, so under
+   the standing hand-off rule the brain may stop and ask before it
+   replaces — that pause is the rule working, not a workflow failure; a
+   one-word confirmation resumes the run. A workflow never overrides the
+   hand-off list.
 4. Read the renamed file back once more.
 
 *Verify:* the post-rename read-back equals the leg-1 values, line for line.

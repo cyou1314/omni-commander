@@ -252,5 +252,20 @@ improvising.
 
 **Accept:** same result, faster, and nothing was left to guesswork.
 
+> **Verified on the first test machine (macOS + Codex, 2026-11-05):**
+> the Step 6 relay was solidified as `workflows/01-x-profile-to-notes.md`
+> (a cross-layer runbook: layers in order, exact steps, a verification
+> check at every hand-off — `workflows/README.md` now lists runbooks as
+> a workflow kind). The brain was then invoked by name only, in the same
+> reused session, with no steps re-explained, and completed the run:
+> fresh harvest (same four values), file replaced and read back, Notes
+> note created in the background and read back. One designed pause: at
+> the rename, the brain stopped and asked before replacing the previous
+> run's `-done` file, because the standing hand-off list outranks a
+> workflow's own replace instruction. A one-word confirmation resumed
+> it. That hierarchy is intentional — a workflow file can never waive
+> the hand-off list — and the runbook now documents the pause as
+> expected behaviour.
+
 V1 is done. Remote access, a second brain client, and Chrome DevTools MCP are
 V2 topics — do not bolt them on early.
