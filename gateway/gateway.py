@@ -14,6 +14,9 @@ A single-file remote MCP server with OAuth 2.1, product name "Can":
     execution on the gateway host.
       can_status     (read)  - the agent reports the computer's state
       can_write_note (write) - the agent appends a line on the computer
+      can_list_files / can_read_file (read), can_write_file (write,
+      create-only) and can_run_command (exec) - Step 3: the file and
+      terminal layer, confined by the agent to its work folder
   - every JSON-RPC request is logged to traffic.log; tool calls to
     tool-calls.log (ground truth for acceptance tests)
 
@@ -305,37 +308,55 @@ async def agent_result(request: Request):
     return JSONResponse({"ok": True})
 
 
+async def relay_tool(name: str, arguments: dict) -> str:
+    """Shared tool body: offline pre-check, relay to the agent, timeout."""
+    log_line(TOOL_LOG, f"{time.strftime('%H:%M:%S')} CALL {name} args={arguments!r}")
+    if not agent_online():
+        return json.dumps({
+            "error": "agent_offline",
+            "detail": "The Can agent on the owner's computer has not checked in recently; nothing was executed.",
+            "tool": name,
+        })
+    result = await relay(name, arguments)
+    if result is None:
+        return json.dumps({"error": "agent_timeout", "tool": name})
+    return result
+
+
 @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False, idempotentHint=True))
 async def can_status() -> str:
     """Report whether the owner's computer is online, via the Can agent on that computer. Read-only."""
-    log_line(TOOL_LOG, f"{time.strftime('%H:%M:%S')} CALL can_status")
-    if not agent_online():
-        return json.dumps({
-            "product": "Can", "status": "agent_offline",
-            "detail": "The Can agent on the owner's computer has not checked in recently.",
-            "nonce": "CAN-STATUS-1105",
-            "gateway_time": time.strftime("%Y-%m-%d %H:%M:%S"),
-        })
-    result = await relay("can_status", {})
-    if result is None:
-        return json.dumps({"product": "Can", "status": "agent_timeout", "nonce": "CAN-STATUS-1105"})
-    return result
+    return await relay_tool("can_status", {})
 
 
 @mcp.tool(annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=False, idempotentHint=False))
 async def can_write_note(text: str) -> str:
     """Append a short note to the Can write-log on the owner's computer, via the Can agent. This is a WRITE action."""
-    log_line(TOOL_LOG, f"{time.strftime('%H:%M:%S')} CALL can_write_note text={text!r}")
-    if not agent_online():
-        return json.dumps({
-            "written": False, "error": "agent_offline",
-            "detail": "The Can agent on the owner's computer is offline; nothing was written.",
-            "nonce": "CAN-WRITE-1105",
-        })
-    result = await relay("can_write_note", {"text": text})
-    if result is None:
-        return json.dumps({"written": False, "error": "agent_timeout", "nonce": "CAN-WRITE-1105"})
-    return result
+    return await relay_tool("can_write_note", {"text": text})
+
+
+@mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False, idempotentHint=True))
+async def can_list_files(path: str = ".") -> str:
+    """List files and folders inside the Can work folder on the owner's computer. The path is relative to the work folder ("." is the work folder itself). Read-only."""
+    return await relay_tool("can_list_files", {"path": path})
+
+
+@mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False, idempotentHint=True))
+async def can_read_file(path: str) -> str:
+    """Read a text file inside the Can work folder on the owner's computer. The path is relative to the work folder. Read-only."""
+    return await relay_tool("can_read_file", {"path": path})
+
+
+@mcp.tool(annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=False, idempotentHint=False))
+async def can_write_file(path: str, content: str) -> str:
+    """Create a NEW text file inside the Can work folder on the owner's computer. The path is relative to the work folder. Refuses to overwrite an existing file. This is a WRITE action."""
+    return await relay_tool("can_write_file", {"path": path, "content": content})
+
+
+@mcp.tool(annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=True, idempotentHint=False))
+async def can_run_command(command: str) -> str:
+    """Run a shell command on the owner's computer, inside the Can work folder, and return its exit code and output. This EXECUTES on the computer."""
+    return await relay_tool("can_run_command", {"command": command})
 
 
 PAGE_CSS = """
