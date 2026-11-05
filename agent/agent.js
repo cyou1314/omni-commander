@@ -53,7 +53,7 @@ const STARTED = Date.now();
 const LOG = path.join(DIR, "agent.log");
 const STATUS = path.join(DIR, "status.json");
 const WRITELOG = path.join(DIR, "write-log.txt");
-const AGENT_VERSION = "0.8.6";
+const AGENT_VERSION = "0.8.7";
 
 function log(msg) {
   const line = `[${new Date().toISOString()}] ${msg}\n`;
@@ -862,6 +862,31 @@ async function toolDesktopKey(args) {
   return JSON.stringify({ pressed: true, key });
 }
 
+// Convert a PNG screenshot to JPEG with macOS's built-in sips: same picture,
+// a fraction of the bytes. ChatGPT's conversation UI failed to render the
+// large PNG payloads the engine returns (broken placeholder / dropped image)
+// while the model itself received them fine, so screenshots go out as JPEG.
+async function pngToJpeg(pngBuffer, maxDim) {
+  const os = require("node:os");
+  const path = require("node:path");
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "can-shot-"));
+  const inP = path.join(dir, "shot.png");
+  const outP = path.join(dir, "shot.jpg");
+  try {
+    fs.writeFileSync(inP, pngBuffer);
+    await new Promise((resolve, reject) => {
+      const p = spawn("sips", ["-s", "format", "jpeg", "-s", "formatOptions", "62", "-Z", String(maxDim), inP, "--out", outP], { stdio: ["ignore", "pipe", "pipe"] });
+      let err = "";
+      p.stderr.on("data", (d) => { err += d; });
+      p.on("error", reject);
+      p.on("close", (code) => (code === 0 ? resolve() : reject(new Error("sips failed: " + err.slice(0, 200)))));
+    });
+    return fs.readFileSync(outP);
+  } finally {
+    try { fs.rmSync(dir, { recursive: true, force: true }); } catch {}
+  }
+}
+
 async function toolDesktopScreenshot(args) {
   const maxDim = Math.min(Math.max(Number((args && args.max_dim) || 1600), 320), 2560);
   const full = await cuaCallFull("get_desktop_state", { max_image_dimension: maxDim });
@@ -881,9 +906,17 @@ async function toolDesktopScreenshot(args) {
     }
   }
   if (!img) throw new Error("the desktop engine returned no screenshot image");
+  let payload = img.data;
+  let mime = img.mimeType || sc.screenshot_mime_type || "image/png";
+  if (mime === "image/png") {
+    try {
+      const jpg = await pngToJpeg(Buffer.from(img.data, "base64"), maxDim);
+      if (jpg && jpg.length > 1000) { payload = jpg.toString("base64"); mime = "image/jpeg"; }
+    } catch { /* sips unavailable or failed: keep the PNG */ }
+  }
   return JSON.stringify({
-    screenshot_png_b64: img.data,
-    mime: img.mimeType || sc.screenshot_mime_type || "image/png",
+    screenshot_png_b64: payload,
+    mime,
     screen_width: sc.screen_width, screen_height: sc.screen_height,
     screenshot_width: sc.screenshot_width, screenshot_height: sc.screenshot_height,
   });
