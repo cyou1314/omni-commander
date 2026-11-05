@@ -53,7 +53,7 @@ const STARTED = Date.now();
 const LOG = path.join(DIR, "agent.log");
 const STATUS = path.join(DIR, "status.json");
 const WRITELOG = path.join(DIR, "write-log.txt");
-const AGENT_VERSION = "0.8.5";
+const AGENT_VERSION = "0.8.6";
 
 function log(msg) {
   const line = `[${new Date().toISOString()}] ${msg}\n`;
@@ -898,13 +898,20 @@ async function toolDesktopScreenshot(args) {
  *    and timeout all fail closed. A remote brain cannot bypass it.
  * 3) Audit: every tool call and fence decision is appended to
  *    audit.log as a JSON line; can_audit_log reads it back.
- * Config (config.json "fence"): confirmEgo / confirmRun default true,
- * dialogTimeoutS defaults 60. Plus a light rate limit: 30 confirmed
- * sensitive actions per hour. */
+ * Config (config.json "fence"): confirmEgo / confirmRun / confirmDesktop
+ * default true (confirmDesktop falls back to confirmEgo when unset),
+ * dialogTimeoutS defaults 60, trustWindowMin (default 0) skips dialogs
+ * for N minutes after one approval. Plus a light rate limit: 30
+ * confirmed sensitive actions per hour. */
 const AUDIT = path.join(DIR, "audit.log");
 const FENCE = (cfg.fence && typeof cfg.fence === "object") ? cfg.fence : {};
 const CONFIRM_EGO = FENCE.confirmEgo !== false;
 const CONFIRM_RUN = FENCE.confirmRun !== false;
+const CONFIRM_DESKTOP = FENCE.confirmDesktop !== undefined ? FENCE.confirmDesktop !== false : CONFIRM_EGO;
+// Trust window: after one owner approval, skip dialogs for this many
+// minutes (config fence.trustWindowMin, default 0 = always ask).
+const TRUST_WINDOW_MIN = Math.min(Math.max(Number(FENCE.trustWindowMin || 0), 0), 240);
+let trustUntil = 0;
 const DIALOG_TIMEOUT_S = Math.min(Math.max(Number(FENCE.dialogTimeoutS || 60), 10), 120);
 const SENSITIVE = new Set(["can_run_command", "can_ego_click", "can_ego_type", "can_desktop_click", "can_desktop_type", "can_desktop_key"]);
 const sensitiveHits = [];
@@ -998,8 +1005,12 @@ async function guardedExecute(tool, args) {
     });
   }
   if (SENSITIVE.has(tool)) {
-    const needsConfirm = tool === "can_run_command" ? CONFIRM_RUN : CONFIRM_EGO;
-    if (needsConfirm) {
+    const needsConfirm = tool === "can_run_command" ? CONFIRM_RUN
+      : (tool === "can_desktop_click" || tool === "can_desktop_type" || tool === "can_desktop_key") ? CONFIRM_DESKTOP
+      : CONFIRM_EGO;
+    if (needsConfirm && TRUST_WINDOW_MIN > 0 && Date.now() < trustUntil) {
+      audit(tool, sum, "trust_window");
+    } else if (needsConfirm) {
       if (!rateOk()) {
         audit(tool, sum, "rate_limited");
         return JSON.stringify({
@@ -1017,6 +1028,7 @@ async function guardedExecute(tool, args) {
         });
       }
       audit(tool, sum, "owner_confirmed");
+      if (TRUST_WINDOW_MIN > 0) trustUntil = Date.now() + TRUST_WINDOW_MIN * 60000;
     }
   }
   try {
