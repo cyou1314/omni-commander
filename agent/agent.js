@@ -53,7 +53,7 @@ const STARTED = Date.now();
 const LOG = path.join(DIR, "agent.log");
 const STATUS = path.join(DIR, "status.json");
 const WRITELOG = path.join(DIR, "write-log.txt");
-const AGENT_VERSION = "0.8.3";
+const AGENT_VERSION = "0.8.4";
 
 function log(msg) {
   const line = `[${new Date().toISOString()}] ${msg}\n`;
@@ -727,9 +727,18 @@ async function deskResolveWindow(args) {
   }
   if (a.app) {
     const wins = await cuaListWindows(String(a.app));
-    if (!wins.length) throw new Error("no open window found for app: " + a.app);
-    const w = wins.find((x) => x.is_on_screen) || wins[0];
-    return { pid: w.pid, window_id: w.window_id, app: w.app_name || String(a.app), title: w.title || "" };
+    if (wins.length) {
+      const w = wins.find((x) => x.is_on_screen) || wins[0];
+      return { pid: w.pid, window_id: w.window_id, app: w.app_name || String(a.app), title: w.title || "" };
+    }
+    // No local match (the app may run under a localized name, e.g.
+    // Calculator runs as 计算器): let the driver's launch_app resolve
+    // the name -- on an already-running app it returns its windows.
+    const r = await cuaCall("launch_app", { name: String(a.app) });
+    const lw = Array.isArray(r.windows) ? r.windows : [];
+    const w = lw.find((x) => x.is_on_screen) || lw[0];
+    if (w) return { pid: w.pid, window_id: w.window_id, app: String(a.app), title: w.title || "" };
+    throw new Error("no open window found for app: " + a.app);
   }
   if (deskLast) return deskLast;
   throw new Error("no window selected yet: call can_desktop_windows, can_desktop_open_app, or can_desktop_snapshot with an app name first");
