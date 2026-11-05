@@ -12,6 +12,9 @@
  *   can_write_file  -> create a NEW file inside the work folder
  *                      (refuses to overwrite)
  *   can_run_command -> run a shell command with cwd = work folder
+ *   can_browser_*   -> drive Google Chrome via CDP with a dedicated
+ *                      Can profile (NOT the owner's daily browser):
+ *                      open / snapshot (refs) / click / type / close
  * File tools are confined to the work folder (config.workRoot):
  * absolute paths, ".." escapes and symlink escapes are refused.
  * can_run_command has a 30s timeout, capped output, and a starter
@@ -21,7 +24,7 @@
 const fs = require("fs");
 const os = require("os");
 const path = require("path");
-const { execFileSync, exec } = require("child_process");
+const { execFileSync, exec, spawn } = require("child_process");
 
 const DIR = __dirname;
 const cfg = JSON.parse(fs.readFileSync(path.join(DIR, "config.json"), "utf8"));
@@ -34,7 +37,7 @@ const STARTED = Date.now();
 const LOG = path.join(DIR, "agent.log");
 const STATUS = path.join(DIR, "status.json");
 const WRITELOG = path.join(DIR, "write-log.txt");
-const AGENT_VERSION = "0.3.0";
+const AGENT_VERSION = "0.4.0";
 
 function log(msg) {
   const line = `[${new Date().toISOString()}] ${msg}\n`;
@@ -190,6 +193,203 @@ function toolRunCommand(args) {
   });
 }
 
+/* -------------------------------------------------------- browser layer */
+/* Drives the installed Google Chrome over CDP (DevTools protocol) with
+ * a dedicated Can profile (~/can-agent/browser-profile) — NOT the
+ * owner's daily browser and NOT any logged-in profile. Zero-dep:
+ * Node's built-in WebSocket speaks to Chrome's debugging socket. */
+const CHROME_BIN = "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome";
+const BROWSER_PROFILE = path.join(DIR, "browser-profile");
+let browser = null; // { proc, ws, sessionId, seq, pending: Map }
+
+function cdpSend(b, method, params, sessionId) {
+  return new Promise((resolve, reject) => {
+    const id = ++b.seq;
+    b.pending.set(id, { resolve, reject });
+    const msg = { id, method, params: params || {} };
+    if (sessionId) msg.sessionId = sessionId;
+    b.ws.send(JSON.stringify(msg));
+  });
+}
+
+async function ensureBrowser() {
+  if (browser && browser.ws && browser.ws.readyState === 1) return browser;
+  if (!fs.existsSync(CHROME_BIN)) throw new Error("Google Chrome is not installed");
+  fs.mkdirSync(BROWSER_PROFILE, { recursive: true });
+  const proc = spawn(CHROME_BIN, [
+    "--remote-debugging-port=0",
+    "--user-data-dir=" + BROWSER_PROFILE,
+    "--no-first-run", "--no-default-browser-check",
+    "--window-size=1280,900",
+    "about:blank",
+  ], { stdio: ["ignore", "ignore", "pipe"] });
+  const wsUrl = await new Promise((resolve, reject) => {
+    let buf = "";
+    const timer = setTimeout(() => reject(new Error("Chrome DevTools did not start in 20s")), 20000);
+    proc.stderr.on("data", (d) => {
+      buf += d.toString();
+      const m = buf.match(/DevTools listening on (ws:\/\/\S+)/);
+      if (m) { clearTimeout(timer); resolve(m[1]); }
+    });
+    proc.on("exit", () => { clearTimeout(timer); reject(new Error("Chrome exited early")); });
+  });
+  const ws = new WebSocket(wsUrl);
+  await new Promise((resolve, reject) => {
+    ws.addEventListener("open", resolve, { once: true });
+    ws.addEventListener("error", reject, { once: true });
+  });
+  const b = { proc, ws, sessionId: null, seq: 0, pending: new Map() };
+  browser = b;
+  ws.addEventListener("message", (ev) => {
+    let msg;
+    try { msg = JSON.parse(ev.data); } catch (e) { return; }
+    if (msg.id && b.pending.has(msg.id)) {
+      const p = b.pending.get(msg.id);
+      b.pending.delete(msg.id);
+      if (msg.error) p.reject(new Error(msg.error.message || "CDP error"));
+      else p.resolve(msg.result || {});
+    }
+  });
+  ws.addEventListener("close", () => { if (browser === b) browser = null; });
+  proc.on("exit", () => { if (browser === b) browser = null; });
+  const { targetId } = await cdpSend(b, "Target.createTarget", { url: "about:blank" });
+  const { sessionId } = await cdpSend(b, "Target.attachToTarget", { targetId, flatten: true });
+  b.sessionId = sessionId;
+  await cdpSend(b, "Page.enable", {}, sessionId);
+  await cdpSend(b, "Runtime.enable", {}, sessionId);
+  return b;
+}
+
+async function evalJs(expression) {
+  const b = await ensureBrowser();
+  const r = await cdpSend(b, "Runtime.evaluate", {
+    expression, returnByValue: true, awaitPromise: true,
+  }, b.sessionId);
+  if (r.exceptionDetails) {
+    const t = (r.exceptionDetails.exception && r.exceptionDetails.exception.description) || r.exceptionDetails.text || "page JS error";
+    throw new Error(String(t).slice(0, 300));
+  }
+  return r.result ? r.result.value : undefined;
+}
+
+async function waitReady(maxMs) {
+  const deadline = Date.now() + (maxMs || 9000);
+  while (Date.now() < deadline) {
+    const state = await evalJs("document.readyState").catch(() => "complete");
+    if (state === "complete" || state === "interactive") return;
+    await new Promise((r) => setTimeout(r, 300));
+  }
+}
+
+async function toolBrowserOpen(args) {
+  const url = String((args && args.url) || "");
+  if (!/^https?:\/\//i.test(url)) throw new Error("url must start with http:// or https://");
+  const b = await ensureBrowser();
+  await cdpSend(b, "Page.navigate", { url }, b.sessionId);
+  await waitReady(9000);
+  const info = await evalJs("({url: location.href, title: document.title})");
+  return JSON.stringify({ opened: true, url: info.url, title: info.title });
+}
+
+const SNAPSHOT_JS = `(() => {
+  document.querySelectorAll("[data-can-ref]").forEach((el) => el.removeAttribute("data-can-ref"));
+  const sel = 'a[href], button, input, select, textarea, summary, [role="button"], [role="link"], [role="checkbox"], [role="radio"], [role="tab"], [onclick]';
+  const els = Array.from(document.querySelectorAll(sel)).filter((el) => {
+    const r = el.getClientRects();
+    const s = getComputedStyle(el);
+    return r.length > 0 && s.visibility !== "hidden" && s.display !== "none";
+  });
+  const lines = [];
+  els.slice(0, 120).forEach((el, i) => {
+    const ref = "e" + (i + 1);
+    el.setAttribute("data-can-ref", ref);
+    const tag = el.tagName.toLowerCase();
+    let kind = tag;
+    if (tag === "input") kind = "input[type=" + (el.getAttribute("type") || "text") + "]";
+    const label = (el.getAttribute("aria-label") || "").trim()
+      || (el.labels && el.labels[0] ? el.labels[0].innerText.trim() : "")
+      || (el.getAttribute("placeholder") || "").trim()
+      || (el.getAttribute("name") || "").trim()
+      || (el.innerText || "").trim().replace(/\\s+/g, " ").slice(0, 60);
+    const val = tag === "input" || tag === "textarea" || tag === "select" ? (el.value || "") : "";
+    lines.push(ref + " " + kind + (label ? " \\"" + label + "\\"" : "") + (val ? " value=\\"" + val + "\\"" : ""));
+  });
+  return { url: location.href, title: document.title, elements: lines,
+           text: (document.body ? document.body.innerText : "").slice(0, 1500),
+           element_count: els.length, truncated: els.length > 120 };
+})()`;
+
+async function toolBrowserSnapshot() {
+  await ensureBrowser();
+  const snap = await evalJs(SNAPSHOT_JS);
+  return JSON.stringify(snap);
+}
+
+async function toolBrowserClick(args) {
+  const ref = String((args && args.ref) || "");
+  if (!/^e\d+$/.test(ref)) throw new Error("ref must look like e3 (from can_browser_snapshot)");
+  const out = await evalJs(`(() => {
+    const el = document.querySelector('[data-can-ref="${ref}"]');
+    if (!el) return { clicked: false, error: "ref not found; take a fresh snapshot" };
+    el.scrollIntoView({ block: "center" });
+    el.click();
+    return { clicked: true, tag: el.tagName.toLowerCase(),
+             text: (el.innerText || el.value || "").trim().slice(0, 80) };
+  })()`);
+  await new Promise((r) => setTimeout(r, 900));
+  await waitReady(6000).catch(() => {});
+  const info = await evalJs("({url: location.href, title: document.title})").catch(() => ({}));
+  return JSON.stringify(Object.assign({}, out, info));
+}
+
+async function toolBrowserType(args) {
+  const ref = String((args && args.ref) || "");
+  const text = String((args && args.text) ?? "");
+  const submit = Boolean(args && args.submit);
+  if (!/^e\d+$/.test(ref)) throw new Error("ref must look like e3 (from can_browser_snapshot)");
+  const out = await evalJs(`(() => {
+    const el = document.querySelector('[data-can-ref="${ref}"]');
+    if (!el) return { typed: false, error: "ref not found; take a fresh snapshot" };
+    el.focus();
+    const proto = el instanceof HTMLTextAreaElement ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype;
+    const setter = Object.getOwnPropertyDescriptor(proto, "value").set;
+    setter.call(el, ${JSON.stringify(text)});
+    el.dispatchEvent(new Event("input", { bubbles: true }));
+    el.dispatchEvent(new Event("change", { bubbles: true }));
+    let submitted = false;
+    if (${submit ? "true" : "false"}) {
+      if (el.form) { el.form.requestSubmit(); submitted = true; }
+      else {
+        el.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
+        el.dispatchEvent(new KeyboardEvent("keyup", { key: "Enter", bubbles: true }));
+        submitted = true;
+      }
+    }
+    return { typed: true, submitted, value_length: el.value.length };
+  })()`);
+  if (submit) {
+    await new Promise((r) => setTimeout(r, 900));
+    await waitReady(6000).catch(() => {});
+  }
+  const info = await evalJs("({url: location.href, title: document.title})").catch(() => ({}));
+  return JSON.stringify(Object.assign({}, out, info));
+}
+
+async function toolBrowserClose() {
+  if (!browser) return JSON.stringify({ closed: true, was_running: false });
+  const b = browser;
+  browser = null;
+  await Promise.race([
+    cdpSend(b, "Browser.close", {}).catch(() => {}),
+    new Promise((r) => setTimeout(r, 2000)),
+  ]);
+  try { b.ws.close(); } catch (e) {}
+  try { b.proc.kill(); } catch (e) {}
+  return JSON.stringify({ closed: true, was_running: true });
+}
+
+process.on("exit", () => { if (browser) { try { browser.proc.kill(); } catch (e) {} } });
+
 /* ------------------------------------------------------------ dispatch */
 async function execute(tool, args) {
   switch (tool) {
@@ -212,6 +412,11 @@ async function execute(tool, args) {
     case "can_read_file": return toolReadFile(args);
     case "can_write_file": return toolWriteFile(args);
     case "can_run_command": return toolRunCommand(args);
+    case "can_browser_open": return toolBrowserOpen(args);
+    case "can_browser_snapshot": return toolBrowserSnapshot();
+    case "can_browser_click": return toolBrowserClick(args);
+    case "can_browser_type": return toolBrowserType(args);
+    case "can_browser_close": return toolBrowserClose();
     default: throw new Error("unknown tool: " + tool);
   }
 }

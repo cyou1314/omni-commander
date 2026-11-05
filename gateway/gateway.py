@@ -359,6 +359,36 @@ async def can_run_command(command: str) -> str:
     return await relay_tool("can_run_command", {"command": command})
 
 
+@mcp.tool(annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=False, idempotentHint=False))
+async def can_browser_open(url: str) -> str:
+    """Open a web page in Can's own browser on the owner's computer (a dedicated browser profile, not the owner's daily browser) and return the page title and URL."""
+    return await relay_tool("can_browser_open", {"url": url})
+
+
+@mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False, idempotentHint=True))
+async def can_browser_snapshot() -> str:
+    """Take a snapshot of the current page in Can's browser: URL, title, page text, and the interactive elements with refs (e1, e2, ...) to use with can_browser_click and can_browser_type. Read-only."""
+    return await relay_tool("can_browser_snapshot", {})
+
+
+@mcp.tool(annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=True, idempotentHint=False))
+async def can_browser_click(ref: str) -> str:
+    """Click the element with the given ref (from can_browser_snapshot) in Can's browser. This ACTS on the page."""
+    return await relay_tool("can_browser_click", {"ref": ref})
+
+
+@mcp.tool(annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=True, idempotentHint=False))
+async def can_browser_type(ref: str, text: str, submit: bool = False) -> str:
+    """Type text into the element with the given ref (from can_browser_snapshot) in Can's browser. Set submit=true to submit the form afterwards. This ACTS on the page."""
+    return await relay_tool("can_browser_type", {"ref": ref, "text": text, "submit": submit})
+
+
+@mcp.tool(annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=False, idempotentHint=False))
+async def can_browser_close() -> str:
+    """Close Can's browser on the owner's computer."""
+    return await relay_tool("can_browser_close", {})
+
+
 PAGE_CSS = """
 body{font-family:-apple-system,'PingFang SC','Microsoft YaHei',sans-serif;background:#eef0f4;
 color:#1c2330;display:flex;align-items:center;justify-content:center;min-height:100vh;margin:0}
