@@ -487,14 +487,10 @@ async def can_desktop_key(key: str, ref: str = "", pid: int = 0, window_id: int 
     return await relay_tool("can_desktop_key", {"key": key, "ref": ref, "pid": pid, "window_id": window_id}, timeout=115)
 
 
-@mcp.tool(
-    annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False, idempotentHint=True),
-    meta={"openai/outputTemplate": SCREENSHOT_WIDGET_URI},
-    structured_output=False,
-)
-async def can_desktop_screenshot(max_dim: int = 1600) -> CallToolResult:
-    """Take a REAL screenshot of the owner's computer screen (the whole display) and return it as an image visible in this conversation. Use it whenever the user asks to SEE the screen, or when a structural snapshot is not enough to know what is on it. max_dim caps the image's long edge in pixels (default 1600). Read-only: nothing on the computer is touched."""
-    raw = await relay_tool("can_desktop_screenshot", {"max_dim": max_dim}, timeout=60)
+def _image_result(raw: str, summary: str) -> CallToolResult:
+    """Wrap an agent image payload (screenshot / window shot / zoom crop) as a
+    CallToolResult: text summary + image for the model, structuredContent with
+    the viewing link for the widget, and the data URI in _meta (widget-only)."""
     try:
         data = json.loads(raw)
     except Exception:
@@ -508,14 +504,9 @@ async def can_desktop_screenshot(max_dim: int = 1600) -> CallToolResult:
         link = stash_shot(base64.b64decode(b64), mime)
     except Exception:
         link = ""
-    summary = (
-        f"Screenshot of the owner's computer screen "
-        f"({data.get('screenshot_width')}x{data.get('screenshot_height')} image, "
-        f"display {data.get('screen_width')}x{data.get('screen_height')})."
-    )
     if link:
         summary += (
-            f" The screenshot is shown to the user inline by the Can viewer "
+            f" The image is shown to the user inline by the Can viewer "
             f"component. If it does not appear, give the user this viewing link "
             f"exactly as written (valid 10 minutes): {link}"
         )
@@ -533,6 +524,26 @@ async def can_desktop_screenshot(max_dim: int = 1600) -> CallToolResult:
         },
         _meta={"can/image_data": f"data:{mime};base64,{b64}"},
     )
+
+
+@mcp.tool(
+    annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False, idempotentHint=True),
+    meta={"openai/outputTemplate": SCREENSHOT_WIDGET_URI},
+    structured_output=False,
+)
+async def can_desktop_screenshot(max_dim: int = 1600) -> CallToolResult:
+    """Take a REAL screenshot of the owner's computer screen (the whole display) and return it as an image visible in this conversation. Use it whenever the user asks to SEE the screen, or when a structural snapshot is not enough to know what is on it. max_dim caps the image's long edge in pixels (default 1600). The returned image's pixel dimensions are stated in the result; pixel clicks with space "desktop" are read off this image. Read-only: nothing on the computer is touched."""
+    raw = await relay_tool("can_desktop_screenshot", {"max_dim": max_dim}, timeout=60)
+    try:
+        data = json.loads(raw)
+        summary = (
+            f"Screenshot of the owner's computer screen "
+            f"({data.get('screenshot_width')}x{data.get('screenshot_height')} image, "
+            f"display {data.get('screen_width')}x{data.get('screen_height')})."
+        )
+    except Exception:
+        summary = "Screenshot of the owner's computer screen."
+    return _image_result(raw, summary)
 
 
 @mcp.tool(annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=True, idempotentHint=False))
@@ -761,6 +772,49 @@ class LoggingASGI:
             return await receive()
 
         await self.app(scope, replay, send)
+
+
+@mcp.tool(
+    annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False, idempotentHint=True),
+    meta={"openai/outputTemplate": SCREENSHOT_WIDGET_URI},
+    structured_output=False,
+)
+async def can_desktop_window_shot(app: str = "", pid: int = 0, window_id: int = 0) -> CallToolResult:
+    """Screenshot ONE application window and return its image plus pixel dimensions. Use this BEFORE pixel clicking in that window: read coordinates off THIS image, then call can_desktop_click_xy / can_desktop_drag_xy with space "window" and img_w/img_h set to this image's screenshot_width/screenshot_height. Prefer can_desktop_snapshot when the window's controls are readable as a tree; use pixel tools for canvas, video, WebGL or custom-drawn surfaces the tree cannot see. Target the window by app name (e.g. "Calculator") or pid/window_id from can_desktop_windows."""
+    raw = await relay_tool("can_desktop_window_shot", {"app": app, "pid": pid, "window_id": window_id}, timeout=60)
+    try:
+        data = json.loads(raw)
+        w = data.get("window") or {}
+        summary = (
+            f"Screenshot of window pid {w.get('pid')} / window {w.get('window_id')} "
+            f"({data.get('screenshot_width')}x{data.get('screenshot_height')} image)."
+        )
+    except Exception:
+        summary = "Screenshot of an application window."
+    return _image_result(raw, summary)
+
+
+@mcp.tool(
+    annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False, idempotentHint=True),
+    meta={"openai/outputTemplate": SCREENSHOT_WIDGET_URI},
+    structured_output=False,
+)
+async def can_desktop_zoom(x1: float, y1: float, x2: float, y2: float, app: str = "", pid: int = 0, window_id: int = 0, img_w: int = 0, img_h: int = 0) -> CallToolResult:
+    """Enlarge a region of a window: (x1, y1) top-left and (x2, y2) bottom-right corners, in pixels of the window image from can_desktop_window_shot (pass its dimensions as img_w/img_h). Returns a zoomed crop image. Afterwards, click a point inside the crop with can_desktop_click_xy using from_zoom=true and coordinates read off THIS crop image. Use when a target is too small to locate precisely in the full window shot."""
+    raw = await relay_tool("can_desktop_zoom", {"x1": x1, "y1": y1, "x2": x2, "y2": y2, "app": app, "pid": pid, "window_id": window_id, "img_w": img_w, "img_h": img_h}, timeout=60)
+    return _image_result(raw, "Zoomed crop of the window region. To click inside it, use can_desktop_click_xy with from_zoom=true and coordinates from this crop.")
+
+
+@mcp.tool(annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=True, idempotentHint=False))
+async def can_desktop_click_xy(x: float, y: float, space: str = "window", app: str = "", pid: int = 0, window_id: int = 0, img_w: int = 0, img_h: int = 0, from_zoom: bool = False) -> str:
+    """Click at PIXEL coordinates taken from an image. space "window" (default): x, y are pixels in the image from can_desktop_window_shot of that window - pass that image's dimensions as img_w/img_h. space "desktop": x, y are pixels in the full-screen image from can_desktop_screenshot - pass its dimensions as img_w/img_h. from_zoom=true: x, y are pixels in the latest can_desktop_zoom crop for that window (img_w/img_h not needed). Use ONLY when can_desktop_snapshot cannot address the target (canvas, video, WebGL, custom-drawn UI). Always verify the effect afterwards with a fresh snapshot or shot."""
+    return await relay_tool("can_desktop_click_xy", {"x": x, "y": y, "space": space, "app": app, "pid": pid, "window_id": window_id, "img_w": img_w, "img_h": img_h, "from_zoom": from_zoom}, timeout=60)
+
+
+@mcp.tool(annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=True, idempotentHint=False))
+async def can_desktop_drag_xy(from_x: float, from_y: float, to_x: float, to_y: float, space: str = "window", app: str = "", pid: int = 0, window_id: int = 0, img_w: int = 0, img_h: int = 0, from_zoom: bool = False, duration_ms: int = 600) -> str:
+    """Drag from one pixel point to another (press, move, release). Coordinate rules are the same as can_desktop_click_xy: points are read off the can_desktop_window_shot image (space "window"), the can_desktop_screenshot image (space "desktop"), or the latest zoom crop (from_zoom=true). Use for sliders, marquee selection, moving panels, and drag-and-drop on surfaces the structural snapshot cannot address. Verify afterwards with a fresh snapshot or shot."""
+    return await relay_tool("can_desktop_drag_xy", {"from_x": from_x, "from_y": from_y, "to_x": to_x, "to_y": to_y, "space": space, "app": app, "pid": pid, "window_id": window_id, "img_w": img_w, "img_h": img_h, "from_zoom": from_zoom, "duration_ms": duration_ms}, timeout=60)
 
 
 if __name__ == "__main__":

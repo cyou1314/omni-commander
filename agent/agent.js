@@ -53,7 +53,7 @@ const STARTED = Date.now();
 const LOG = path.join(DIR, "agent.log");
 const STATUS = path.join(DIR, "status.json");
 const WRITELOG = path.join(DIR, "write-log.txt");
-const AGENT_VERSION = "0.8.9";
+const AGENT_VERSION = "0.9.1";
 
 function log(msg) {
   const line = `[${new Date().toISOString()}] ${msg}\n`;
@@ -1009,8 +1009,152 @@ const CONFIRM_DESKTOP = FENCE.confirmDesktop !== undefined ? FENCE.confirmDeskto
 const TRUST_WINDOW_MIN = Math.min(Math.max(Number(FENCE.trustWindowMin || 0), 0), 240);
 let trustUntil = 0;
 const DIALOG_TIMEOUT_S = Math.min(Math.max(Number(FENCE.dialogTimeoutS || 60), 10), 120);
-const SENSITIVE = new Set(["can_run_command", "can_ego_click", "can_ego_type", "can_desktop_click", "can_desktop_type", "can_desktop_key", "can_desktop_batch"]);
+const SENSITIVE = new Set(["can_run_command", "can_ego_click", "can_ego_type", "can_desktop_click", "can_desktop_type", "can_desktop_key", "can_desktop_batch", "can_desktop_click_xy", "can_desktop_drag_xy"]);
 const sensitiveHits = [];
+
+// --- Pixel fallback -----------------------------------------------------------
+// The structural snapshot cannot see canvas / WebGL / custom-drawn surfaces.
+// These tools work in image space: the model reads coordinates off an image
+// it received (a window shot, the full-screen screenshot, or a zoom crop)
+// and passes img_w/img_h saying which image. The agent rescales them into
+// the pixel space of the driver's current capture for that target.
+const deskShotDims = new Map(); // "pid:window_id" -> { w, h } of the latest window capture
+
+function extractImageBlock(full) {
+  const content = (full.raw && full.raw.content) || [];
+  for (const block of content) {
+    if (block && block.type === "image" && block.data) return block;
+  }
+  const sc = full.sc || {};
+  for (const k of Object.keys(sc)) {
+    if (typeof sc[k] === "string" && sc[k].length > 20000) {
+      return { data: sc[k], mimeType: sc.screenshot_mime_type || "image/png" };
+    }
+  }
+  return null;
+}
+
+async function imageResultJson(full, extra) {
+  const img = extractImageBlock(full);
+  if (!img) throw new Error("the desktop engine returned no image");
+  const sc = full.sc || {};
+  let payload = img.data;
+  let mime = img.mimeType || sc.screenshot_mime_type || "image/png";
+  if (mime === "image/png") {
+    try {
+      // The driver's window captures can be supersampled (several times the
+      // reported screenshot size). Shrink to the reported capture dims so
+      // the image the model receives matches screenshot_width/height.
+      const target = Math.max(Number(sc.screenshot_width) || 0, Number(sc.screenshot_height) || 0) || 4096;
+      const jpg = await pngToJpeg(Buffer.from(img.data, "base64"), target);
+      if (jpg && jpg.length > 1000) { payload = jpg.toString("base64"); mime = "image/jpeg"; }
+    } catch { /* keep the PNG */ }
+  }
+  return JSON.stringify({
+    screenshot_png_b64: payload, mime,
+    screenshot_width: sc.screenshot_width, screenshot_height: sc.screenshot_height,
+    ...(extra || {}),
+  });
+}
+
+async function toolDesktopWindowShot(args) {
+  const win = await deskResolveWindow(args);
+  const full = await cuaCallFull("get_window_state", {
+    pid: win.pid, window_id: win.window_id, tree_format: "markdown", include_screenshot: true,
+  });
+  const sc = full.sc || {};
+  if (sc.screenshot_width && sc.screenshot_height) {
+    deskShotDims.set(deskKey(win.pid, win.window_id), { w: Number(sc.screenshot_width), h: Number(sc.screenshot_height) });
+  }
+  return imageResultJson(full, {
+    window: { pid: win.pid, window_id: win.window_id },
+    screen_width: sc.screenshot_width, screen_height: sc.screenshot_height,
+  });
+}
+
+function scaleToCapture(x, y, imgW, imgH, capW, capH) {
+  const iw = Number(imgW) || capW, ih = Number(imgH) || capH;
+  return {
+    x: Math.round(capW && iw ? (x * capW) / iw : x),
+    y: Math.round(capH && ih ? (y * capH) / ih : y),
+  };
+}
+
+async function pixelTarget(args) {
+  const space = String((args && args.space) || "window");
+  if (space === "desktop") {
+    const full = await cuaCallFull("get_desktop_state", {});
+    const sc = full.sc || {};
+    return { mode: "desktop", capW: Number(sc.screenshot_width) || 0, capH: Number(sc.screenshot_height) || 0, captureId: sc.capture_id };
+  }
+  const win = await deskResolveWindow(args);
+  let dims = deskShotDims.get(deskKey(win.pid, win.window_id));
+  if (!dims || !dims.w || !dims.h) {
+    const full = await cuaCallFull("get_window_state", { pid: win.pid, window_id: win.window_id, tree_format: "markdown", include_screenshot: true });
+    const sc = full.sc || {};
+    dims = { w: Number(sc.screenshot_width) || 0, h: Number(sc.screenshot_height) || 0 };
+    if (dims.w && dims.h) deskShotDims.set(deskKey(win.pid, win.window_id), dims);
+  }
+  return { mode: "window", win, capW: dims.w, capH: dims.h };
+}
+
+async function toolDesktopClickXY(args) {
+  const a = args || {};
+  const x = Number(a.x), y = Number(a.y);
+  if (!isFinite(x) || !isFinite(y)) throw new Error("x and y are required (pixels in the image you are looking at)");
+  if (a.from_zoom) {
+    const win = await deskResolveWindow(a);
+    await cuaCall("click", { pid: win.pid, window_id: win.window_id, x, y, from_zoom: true });
+    return JSON.stringify({ clicked: true, space: "zoom", at: [x, y], window: { pid: win.pid, window_id: win.window_id } });
+  }
+  const t = await pixelTarget(a);
+  const p = scaleToCapture(x, y, a.img_w, a.img_h, t.capW, t.capH);
+  if (t.mode === "desktop") {
+    const params = { scope: "desktop", x: p.x, y: p.y };
+    if (t.captureId) params.capture_id = t.captureId;
+    await cuaCall("click", params);
+    return JSON.stringify({ clicked: true, space: "desktop", at: [p.x, p.y], capture: [t.capW, t.capH] });
+  }
+  await cuaCall("click", { pid: t.win.pid, window_id: t.win.window_id, x: p.x, y: p.y });
+  return JSON.stringify({ clicked: true, space: "window", at: [p.x, p.y], window: { pid: t.win.pid, window_id: t.win.window_id }, capture: [t.capW, t.capH] });
+}
+
+async function toolDesktopDragXY(args) {
+  const a = args || {};
+  const fx = Number(a.from_x), fy = Number(a.from_y), tx = Number(a.to_x), ty = Number(a.to_y);
+  if (![fx, fy, tx, ty].every(isFinite)) throw new Error("from_x, from_y, to_x, to_y are required");
+  const dur = Number(a.duration_ms) || 600;
+  if (a.from_zoom) {
+    const win = await deskResolveWindow(a);
+    await cuaCall("drag", { pid: win.pid, window_id: win.window_id, from_x: fx, from_y: fy, to_x: tx, to_y: ty, from_zoom: true, duration_ms: dur });
+    return JSON.stringify({ dragged: true, space: "zoom", window: { pid: win.pid, window_id: win.window_id } });
+  }
+  const t = await pixelTarget(a);
+  const p1 = scaleToCapture(fx, fy, a.img_w, a.img_h, t.capW, t.capH);
+  const p2 = scaleToCapture(tx, ty, a.img_w, a.img_h, t.capW, t.capH);
+  const base = { from_x: p1.x, from_y: p1.y, to_x: p2.x, to_y: p2.y, duration_ms: dur };
+  if (t.mode === "desktop") {
+    await cuaCall("drag", { ...base, scope: "desktop" });
+    return JSON.stringify({ dragged: true, space: "desktop", from: [p1.x, p1.y], to: [p2.x, p2.y] });
+  }
+  await cuaCall("drag", { ...base, pid: t.win.pid, window_id: t.win.window_id });
+  return JSON.stringify({ dragged: true, space: "window", from: [p1.x, p1.y], to: [p2.x, p2.y], window: { pid: t.win.pid, window_id: t.win.window_id } });
+}
+
+async function toolDesktopZoom(args) {
+  const a = args || {};
+  const win = await deskResolveWindow(a);
+  // The driver requires a current screenshot context for zoom; a fresh
+  // window state read establishes it and gives the capture's pixel space.
+  const fresh = await cuaCallFull("get_window_state", { pid: win.pid, window_id: win.window_id, tree_format: "markdown", include_screenshot: true });
+  const sc0 = fresh.sc || {};
+  const capW = Number(sc0.screenshot_width) || 0, capH = Number(sc0.screenshot_height) || 0;
+  if (capW && capH) deskShotDims.set(deskKey(win.pid, win.window_id), { w: capW, h: capH });
+  const p1 = scaleToCapture(Number(a.x1) || 0, Number(a.y1) || 0, a.img_w, a.img_h, capW, capH);
+  const p2 = scaleToCapture(Number(a.x2) || 0, Number(a.y2) || 0, a.img_w, a.img_h, capW, capH);
+  const full = await cuaCallFull("zoom", { pid: win.pid, window_id: win.window_id, x1: p1.x, y1: p1.y, x2: p2.x, y2: p2.y });
+  return imageResultJson(full, { window: { pid: win.pid, window_id: win.window_id }, zoom_of: [p1.x, p1.y, p2.x, p2.y] });
+}
 
 function audit(tool, argsSum, decision, detail) {
   const line = JSON.stringify({
@@ -1200,6 +1344,10 @@ async function execute(tool, args) {
     case "can_desktop_key": return toolDesktopKey(args);
     case "can_desktop_screenshot": return toolDesktopScreenshot(args);
     case "can_desktop_batch": return toolDesktopBatch(args);
+    case "can_desktop_window_shot": return toolDesktopWindowShot(args);
+    case "can_desktop_click_xy": return toolDesktopClickXY(args);
+    case "can_desktop_drag_xy": return toolDesktopDragXY(args);
+    case "can_desktop_zoom": return toolDesktopZoom(args);
     default: throw new Error("unknown tool: " + tool);
   }
 }
