@@ -53,7 +53,7 @@ const STARTED = Date.now();
 const LOG = path.join(DIR, "agent.log");
 const STATUS = path.join(DIR, "status.json");
 const WRITELOG = path.join(DIR, "write-log.txt");
-const AGENT_VERSION = "0.8.0";
+const AGENT_VERSION = "0.8.1";
 
 function log(msg) {
   const line = `[${new Date().toISOString()}] ${msg}\n`;
@@ -665,17 +665,21 @@ function cuaText(result) {
   return "";
 }
 
-async function cuaCall(name, args) {
+async function cuaCallFull(name, args) {
   if (!cuaChild) cuaSpawn();
   await cuaReady;
   const result = await cuaRequest("tools/call", {
     name, arguments: Object.assign({ session: CUA_SESSION }, args || {}),
   });
   if (result && result.isError) throw new Error(cuaText(result) || ("cua tool failed: " + name));
-  if (result && result.structuredContent) return result.structuredContent;
-  const text = cuaText(result);
+  return { sc: (result && result.structuredContent) || null, text: cuaText(result), raw: result || {} };
+}
+
+async function cuaCall(name, args) {
+  const { sc, text } = await cuaCallFull(name, args);
+  if (sc) return sc;
   if (text) { try { return JSON.parse(text); } catch (e) { return { text }; } }
-  return result || {};
+  return {};
 }
 
 async function cuaListWindows(app) {
@@ -736,10 +740,17 @@ async function toolDesktopOpenApp(args) {
 
 async function toolDesktopSnapshot(args) {
   const win = await deskResolveWindow(args);
-  const r = await cuaCall("get_window_state", {
+  const full = await cuaCallFull("get_window_state", {
     pid: win.pid, window_id: win.window_id,
-    tree_format: "elements", include_screenshot: false,
+    tree_format: "both", include_screenshot: false,
   });
+  const r = full.sc || {};
+  // The markdown rendering carries readouts some apps never expose as
+  // elements (e.g. the Calculator display); pass it through, trimmed.
+  let treeText = "";
+  if (full.text && full.text.trim() && !full.text.trim().startsWith("{")) {
+    treeText = full.text.slice(0, 6000);
+  }
   const els = Array.isArray(r.elements) ? r.elements : [];
   const tokens = new Map();
   const out = [];
@@ -762,7 +773,7 @@ async function toolDesktopSnapshot(args) {
   return JSON.stringify({
     window: { pid: win.pid, window_id: win.window_id, app: deskLast.app, title: deskLast.title },
     count: out.length, truncated: Boolean(r.truncated),
-    elements: out,
+    elements: out, tree: treeText || undefined,
   });
 }
 
