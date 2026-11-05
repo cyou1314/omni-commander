@@ -33,6 +33,7 @@ const fs = require("fs");
 const os = require("os");
 const path = require("path");
 const { execFileSync, exec, execFile, spawn } = require("child_process");
+const net = require("net");
 
 const DIR = __dirname;
 const cfg = JSON.parse(fs.readFileSync(path.join(DIR, "config.json"), "utf8"));
@@ -45,7 +46,7 @@ const STARTED = Date.now();
 const LOG = path.join(DIR, "agent.log");
 const STATUS = path.join(DIR, "status.json");
 const WRITELOG = path.join(DIR, "write-log.txt");
-const AGENT_VERSION = "0.6.1";
+const AGENT_VERSION = "0.7.0";
 
 function log(msg) {
   const line = `[${new Date().toISOString()}] ${msg}\n`;
@@ -571,6 +572,145 @@ async function toolEgoFinish() {
   return JSON.stringify(r);
 }
 
+/* ------------------------------------------- chrome-family ext backend */
+/* Browser universalization: a Can extension (extension/ in the repo)
+ * loaded into ANY Chrome-family browser (Chrome / Edge / Brave / Arc)
+ * bridges that real, running browser to this agent. Chrome spawns
+ * ext-host.js (native messaging, com.can.agent); the host connects to
+ * this agent's local bridge (TCP 127.0.0.1:18792, localhost only,
+ * newline JSON). So Can can see and drive the tabs the owner actually
+ * has open — including logged-in pages — in whichever Chromium
+ * browser he uses daily. Click/type are fence-gated (see below). */
+const EXT_PORT = 18792;
+const EXT_STATE = path.join(DIR, "ext-state.json");
+let extSock = null;
+let extSeq = 0;
+const extPending = new Map();
+
+const extServer = net.createServer((s) => {
+  if (extSock) { try { extSock.destroy(); } catch (e) {} }
+  extSock = s;
+  let buf = "";
+  s.on("data", (d) => {
+    buf += d.toString("utf8");
+    let i;
+    while ((i = buf.indexOf("\n")) >= 0) {
+      const line = buf.slice(0, i);
+      buf = buf.slice(i + 1);
+      if (!line.trim()) continue;
+      let m;
+      try { m = JSON.parse(line); } catch (e) { continue; }
+      if (m.type === "hello") log("extension host connected");
+      if (m.type === "result" && extPending.has(m.id)) {
+        const p = extPending.get(m.id);
+        extPending.delete(m.id);
+        if (m.ok) p.resolve(m.result);
+        else p.reject(new Error(m.error || "extension error"));
+      }
+    }
+  });
+  const drop = () => {
+    if (extSock === s) extSock = null;
+    for (const [id, p] of extPending) {
+      extPending.delete(id);
+      p.reject(new Error("extension disconnected"));
+    }
+  };
+  s.on("close", drop);
+  s.on("error", drop);
+});
+extServer.listen(EXT_PORT, "127.0.0.1", () => log(`extension bridge on 127.0.0.1:${EXT_PORT}`));
+extServer.on("error", (e) => log(`extension bridge error: ${e.message}`));
+
+function extCall(cmd, args, timeoutMs) {
+  return new Promise((resolve, reject) => {
+    if (!extSock) {
+      return reject(new Error("chrome extension not connected: load the Can extension in the browser (chrome://extensions) and click its icon once"));
+    }
+    const id = ++extSeq;
+    const timer = setTimeout(() => {
+      extPending.delete(id);
+      reject(new Error("extension call timed out: " + cmd));
+    }, timeoutMs || 45000);
+    extPending.set(id, {
+      resolve: (v) => { clearTimeout(timer); resolve(v); },
+      reject: (e) => { clearTimeout(timer); reject(e); },
+    });
+    extSock.write(JSON.stringify({ type: "call", id, cmd, args: args || {} }) + "\n");
+  });
+}
+
+function extState() {
+  try { return JSON.parse(fs.readFileSync(EXT_STATE, "utf8")); } catch (e) { return {}; }
+}
+function saveExtState(s) {
+  try { fs.writeFileSync(EXT_STATE, JSON.stringify(s)); } catch (e) {}
+}
+
+async function extTabId(args) {
+  if (args && args.tab_id) return Number(args.tab_id);
+  const st = extState();
+  if (st.tabId) return st.tabId;
+  const tabs = await extCall("tabs", {});
+  const act = tabs.find((t) => t.active) || tabs[0];
+  if (!act) throw new Error("no tabs open in the browser");
+  return act.id;
+}
+
+async function toolChromeTabs() {
+  const tabs = await extCall("tabs", {});
+  return JSON.stringify({
+    connected: true, count: tabs.length,
+    tabs: tabs.map((t) => ({
+      tab_id: t.id, active: Boolean(t.active),
+      title: String(t.title || "").slice(0, 120), url: t.url || "",
+    })),
+  });
+}
+
+async function toolChromeOpen(args) {
+  const url = String((args && args.url) || "");
+  if (!/^https?:\/\//i.test(url)) throw new Error("url must start with http:// or https://");
+  const r = await extCall("open", { url }, 60000);
+  const st = extState();
+  st.tabId = r.tabId;
+  saveExtState(st);
+  return JSON.stringify({ opened: true, tab_id: r.tabId, url: r.url || url, title: r.title || "" });
+}
+
+async function toolChromeSnapshot(args) {
+  const tabId = await extTabId(args);
+  const snap = await extCall("snapshot", { tabId });
+  return JSON.stringify({
+    tab_id: tabId, url: snap.url, title: snap.title,
+    elements: snap.elements, text: snap.text,
+  });
+}
+
+async function toolChromeClick(args) {
+  const tabId = await extTabId(args);
+  const ref = String((args && args.ref) || "");
+  if (!/^e\d+$/.test(ref)) throw new Error("ref must come from can_chrome_snapshot (e.g. e3)");
+  const r = await extCall("click", { tabId, ref });
+  return JSON.stringify({ clicked: true, tab_id: tabId, ref, url: (r && r.url) || "" });
+}
+
+async function toolChromeType(args) {
+  const tabId = await extTabId(args);
+  const ref = String((args && args.ref) || "");
+  if (!/^e\d+$/.test(ref)) throw new Error("ref must come from can_chrome_snapshot (e.g. e3)");
+  await extCall("type", { tabId, ref, text: String((args && args.text) || "") });
+  return JSON.stringify({ typed: true, tab_id: tabId, ref });
+}
+
+async function toolChromeClose(args) {
+  const tabId = await extTabId(args);
+  await extCall("close", { tabId });
+  const st = extState();
+  if (st.tabId === tabId) { delete st.tabId; saveExtState(st); }
+  return JSON.stringify({ closed: true, tab_id: tabId });
+}
+
 /* ------------------------------------------------------------ the fence */
 /* Step 4. Three layers, all enforced HERE on the owner's computer:
  * 1) Hard blocks: catastrophic command patterns never run (BLOCKED).
@@ -588,7 +728,7 @@ const FENCE = (cfg.fence && typeof cfg.fence === "object") ? cfg.fence : {};
 const CONFIRM_EGO = FENCE.confirmEgo !== false;
 const CONFIRM_RUN = FENCE.confirmRun !== false;
 const DIALOG_TIMEOUT_S = Math.min(Math.max(Number(FENCE.dialogTimeoutS || 60), 10), 120);
-const SENSITIVE = new Set(["can_run_command", "can_ego_click", "can_ego_type"]);
+const SENSITIVE = new Set(["can_run_command", "can_ego_click", "can_ego_type", "can_chrome_click", "can_chrome_type"]);
 const sensitiveHits = [];
 
 function audit(tool, argsSum, decision, detail) {
@@ -608,6 +748,8 @@ function argsSummary(tool, args) {
     else if (tool === "can_read_file" || tool === "can_write_file" || tool === "can_list_files") s = String(a.path || "");
     else if (tool === "can_browser_open" || tool === "can_ego_open") s = String(a.url || "");
     else if (tool === "can_ego_click" || tool === "can_ego_type") s = `${a.space || "can"} ${a.target || ""} ${a.text || ""}`;
+    else if (tool === "can_chrome_click" || tool === "can_chrome_type") s = `tab ${a.tab_id || ""} ${a.ref || ""} ${a.text || ""}`;
+    else if (tool === "can_chrome_open") s = String(a.url || "");
     else if (tool === "can_browser_click" || tool === "can_browser_type") s = `${a.ref || ""} ${a.text || ""}`;
     else if (tool === "can_ego_claim") s = `space ${a.space_id}`;
     else if (tool === "can_write_note") s = String(a.text || "");
@@ -645,6 +787,12 @@ function sensitiveSummary(tool, args) {
   }
   if (tool === "can_ego_type") {
     return `Can 想在你的日常浏览器（${where}）中输入：\n目标 ${String(a.target || "").slice(0, 60)}\n内容「${String(a.text || "").slice(0, 40)}」`;
+  }
+  if (tool === "can_chrome_click") {
+    return "Can 想在你的 Chrome 系浏览器中点击：\n" + String(a.ref || "").slice(0, 60);
+  }
+  if (tool === "can_chrome_type") {
+    return `Can 想在你的 Chrome 系浏览器中输入：\n目标 ${String(a.ref || "").slice(0, 60)}\n内容「${String(a.text || "").slice(0, 40)}」`;
   }
   return tool;
 }
@@ -754,6 +902,12 @@ async function execute(tool, args) {
     case "can_ego_type": return toolEgoType(args);
     case "can_ego_finish": return toolEgoFinish();
     case "can_audit_log": return toolAuditLog(args);
+    case "can_chrome_tabs": return toolChromeTabs();
+    case "can_chrome_open": return toolChromeOpen(args);
+    case "can_chrome_snapshot": return toolChromeSnapshot(args);
+    case "can_chrome_click": return toolChromeClick(args);
+    case "can_chrome_type": return toolChromeType(args);
+    case "can_chrome_close": return toolChromeClose(args);
     default: throw new Error("unknown tool: " + tool);
   }
 }

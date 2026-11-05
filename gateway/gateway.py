@@ -360,6 +360,42 @@ async def can_run_command(command: str) -> str:
 
 
 @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False, idempotentHint=True))
+async def can_chrome_tabs() -> str:
+    """List the tabs of the owner's REAL Chrome-family browser (Chrome/Edge/Brave/Arc with the Can extension loaded): tab_id, active flag, title, URL — the pages he actually has open. Read-only. Errors if the extension is not connected."""
+    return await relay_tool("can_chrome_tabs", {})
+
+
+@mcp.tool(annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=False, idempotentHint=False))
+async def can_chrome_open(url: str) -> str:
+    """Open a URL in a NEW tab in the owner's real Chrome-family browser (via the Can extension) and remember it as the current tab for snapshot/click/type."""
+    return await relay_tool("can_chrome_open", {"url": url})
+
+
+@mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False, idempotentHint=False))
+async def can_chrome_snapshot(tab_id: int = 0) -> str:
+    """Snapshot a tab in the owner's real browser: URL, title, visible text excerpt, and interactive elements with refs (e1, e2, ...). tab_id 0 = the current Can tab (last opened) or his active tab. Read-only."""
+    return await relay_tool("can_chrome_snapshot", {"tab_id": tab_id})
+
+
+@mcp.tool(annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=True, idempotentHint=False))
+async def can_chrome_click(ref: str, tab_id: int = 0) -> str:
+    """Click an element (ref from can_chrome_snapshot, e.g. "e3") in the owner's real browser. Fence: the owner must approve it in a dialog ON the computer itself; denied or unanswered returns an owner_denied error and nothing is clicked."""
+    return await relay_tool("can_chrome_click", {"ref": ref, "tab_id": tab_id}, timeout=115)
+
+
+@mcp.tool(annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=True, idempotentHint=False))
+async def can_chrome_type(ref: str, text: str, tab_id: int = 0) -> str:
+    """Fill a field (ref from can_chrome_snapshot) in the owner's real browser. Fence: the owner must approve it in a dialog ON the computer itself; denied or unanswered returns an owner_denied error and nothing is typed."""
+    return await relay_tool("can_chrome_type", {"ref": ref, "text": text, "tab_id": tab_id}, timeout=115)
+
+
+@mcp.tool(annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=False, idempotentHint=True))
+async def can_chrome_close(tab_id: int = 0) -> str:
+    """Close a tab in the owner's real browser (tab_id 0 = the current Can tab)."""
+    return await relay_tool("can_chrome_close", {"tab_id": tab_id})
+
+
+@mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False, idempotentHint=True))
 async def can_audit_log(lines: int = 20) -> str:
     """Read the Can agent's local audit log on the owner's computer: every tool call and fence decision (executed / blocked / confirmed / denied), newest last. Read-only."""
     return await relay_tool("can_audit_log", {"lines": lines})
