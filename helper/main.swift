@@ -1,4 +1,4 @@
-// can-helper — Can's own desktop engine (macOS), milestone 2.
+// can-helper — Can's own desktop engine (macOS), milestone 3.
 //
 // Speaks the same stdio JSON-RPC dialect the Can agent already uses with
 // its internal desktop driver: newline-delimited JSON-RPC 2.0, an
@@ -10,8 +10,13 @@
 // Milestone 1: initialize, start_session (no-op), list_windows, launch_app.
 // Milestone 2: get_window_state (AX tree walk -> elements + tokens +
 // markdown tree text, optional window screenshot) and click by
-// element_token (AX press). Remaining verbs answer with an honest
-// isError until their milestone lands (see docs/SELFBUILT-HELPER.md).
+// element_token (AX press).
+// Milestone 3: type_text (focus + unicode key events posted to the pid),
+// set_value (direct AX value write), press_key (named keys and modifier
+// combos posted to the pid), get_desktop_state (full-screen capture via
+// ScreenCaptureKit, optional downscale). Remaining verbs answer with an
+// honest isError until their milestone lands (see
+// docs/SELFBUILT-HELPER.md).
 //
 // Build:  ./build.sh        (swiftc, Xcode Command Line Tools)
 // Run:    ./can-helper mcp  (the agent passes the "mcp" argument)
@@ -22,7 +27,7 @@ import ApplicationServices
 import ImageIO
 import ScreenCaptureKit
 
-let HELPER_VERSION = "0.2.0"
+let HELPER_VERSION = "0.3.0"
 
 // ---------- tiny JSON helpers ----------
 
@@ -369,6 +374,208 @@ func clickElement(id: Any, args: [String: Any]) {
     toolResult(id: id, structured: [String: Any](), text: "{}")
 }
 
+// ---------- typing & keys (milestone 3) ----------
+
+func tokenElement(_ args: [String: Any]) -> AXUIElement? {
+    guard let token = args["element_token"] as? String else { return nil }
+    return tokenRegistry[token]
+}
+
+func focusElement(_ el: AXUIElement) -> Bool {
+    AXUIElementSetAttributeValue(el, kAXFocusedAttribute as CFString, kCFBooleanTrue) == .success
+}
+
+func postKeyEvent(pid: Int, keyCode: CGKeyCode, down: Bool, flags: CGEventFlags) {
+    guard let ev = CGEvent(keyboardEventSource: nil, virtualKey: keyCode, keyDown: down) else { return }
+    ev.flags = flags
+    ev.postToPid(pid_t(pid))
+}
+
+func postUnicodeChar(pid: Int, ch: Character) {
+    let units = Array(String(ch).utf16)
+    for down in [true, false] {
+        guard let ev = CGEvent(keyboardEventSource: nil, virtualKey: 0, keyDown: down) else { continue }
+        units.withUnsafeBufferPointer { buf in
+            ev.keyboardSetUnicodeString(stringLength: units.count, unicodeString: buf.baseAddress)
+        }
+        ev.postToPid(pid_t(pid))
+    }
+}
+
+// type_text: focus the element, then deliver the text as unicode key
+// events to the app (real keystrokes, so fields that react per-keystroke
+// behave). If the element cannot take keyboard focus we error out and
+// the agent falls back to set_value, exactly as it does with the old
+// driver.
+func typeText(id: Any, args: [String: Any]) {
+    let pid = intArg(args, "pid")
+    let text = (args["text"] as? String) ?? ""
+    guard let el = tokenElement(args) else {
+        toolError(id: id, "can-helper: type_text needs a valid element_token from the latest snapshot"); return
+    }
+    if !focusElement(el) {
+        // Some fields report focus failure yet still receive keys when
+        // their window is key; only hard-fail for clearly non-textual
+        // elements.
+        let role = axString(el, kAXRoleAttribute as String)
+        if !["AXTextField", "AXTextArea", "AXComboBox", "AXSearchField"].contains(role) {
+            toolError(id: id, "can-helper: element (role \(role)) cannot take keyboard focus"); return
+        }
+    }
+    Thread.sleep(forTimeInterval: 0.05)
+    for ch in text { postUnicodeChar(pid: pid, ch: ch) }
+    Thread.sleep(forTimeInterval: 0.05)
+    toolResult(id: id, structured: [String: Any](), text: "{}")
+}
+
+func setValue(id: Any, args: [String: Any]) {
+    let value = (args["value"] as? String) ?? ""
+    guard let el = tokenElement(args) else {
+        toolError(id: id, "can-helper: set_value needs a valid element_token from the latest snapshot"); return
+    }
+    var settable = DarwinBoolean(false)
+    AXUIElementIsAttributeSettable(el, kAXValueAttribute as CFString, &settable)
+    if !settable.boolValue {
+        toolError(id: id, "can-helper: element's value is not settable"); return
+    }
+    let err = AXUIElementSetAttributeValue(el, kAXValueAttribute as CFString, value as CFString)
+    if err != .success {
+        toolError(id: id, "can-helper: set_value failed (AXError \(err.rawValue))"); return
+    }
+    toolResult(id: id, structured: [String: Any](), text: "{}")
+}
+
+let keyCodes: [String: CGKeyCode] = [
+    "a": 0, "s": 1, "d": 2, "f": 3, "h": 4, "g": 5, "z": 6, "x": 7, "c": 8,
+    "v": 9, "b": 11, "q": 12, "w": 13, "e": 14, "r": 15, "y": 16, "t": 17,
+    "1": 18, "2": 19, "3": 20, "4": 21, "6": 22, "5": 23, "=": 24, "9": 25,
+    "7": 26, "-": 27, "8": 28, "0": 29, "]": 30, "o": 31, "u": 32, "[": 33,
+    "i": 34, "p": 35, "return": 36, "enter": 36, "l": 37, "j": 38, "'": 39,
+    "k": 40, ";": 41, "\\": 42, ",": 43, "/": 44, "n": 45, "m": 46, ".": 47,
+    "tab": 48, "space": 49, "`": 50, "delete": 51, "backspace": 51,
+    "escape": 53, "esc": 53, "command": 55, "cmd": 55, "shift": 56,
+    "capslock": 57, "option": 58, "alt": 58, "control": 59, "ctrl": 59,
+    "rightshift": 60, "rightoption": 61, "rightcontrol": 62, "fn": 63,
+    "f17": 64, "f18": 79, "f19": 80, "f20": 90, "f5": 96, "f6": 97,
+    "f7": 98, "f3": 99, "f8": 100, "f9": 101, "f11": 103, "f13": 105,
+    "f16": 106, "f10": 109, "f12": 111, "f15": 113, "home": 115,
+    "pageup": 116, "forwarddelete": 117, "f4": 118, "end": 119, "f2": 120,
+    "pagedown": 121, "f1": 122, "left": 123, "right": 124, "down": 125,
+    "up": 126,
+]
+
+// press_key: one named key, optionally with "+"-joined modifiers
+// ("cmd+a"). With an element_token, the element is focused first.
+func pressKey(id: Any, args: [String: Any]) {
+    let pid = intArg(args, "pid")
+    let raw = ((args["key"] as? String) ?? "").lowercased()
+    if raw.isEmpty { toolError(id: id, "can-helper: press_key needs a key"); return }
+    if let el = tokenElement(args) { _ = focusElement(el); Thread.sleep(forTimeInterval: 0.03) }
+    let parts = raw.split(separator: "+").map { $0.trimmingCharacters(in: .whitespaces) }
+    guard let keyName = parts.last, let code = keyCodes[keyName] else {
+        toolError(id: id, "can-helper: unknown key '\(raw)'"); return
+    }
+    var flags: CGEventFlags = []
+    for mod in parts.dropLast() {
+        switch mod {
+        case "cmd", "command": flags.insert(.maskCommand)
+        case "shift": flags.insert(.maskShift)
+        case "option", "alt": flags.insert(.maskAlternate)
+        case "ctrl", "control": flags.insert(.maskControl)
+        case "fn": flags.insert(.maskSecondaryFn)
+        default: toolError(id: id, "can-helper: unknown modifier '\(mod)'"); return
+        }
+    }
+    postKeyEvent(pid: pid, keyCode: code, down: true, flags: flags)
+    postKeyEvent(pid: pid, keyCode: code, down: false, flags: flags)
+    toolResult(id: id, structured: [String: Any](), text: "{}")
+}
+
+// ---------- desktop state (milestone 3) ----------
+
+var captureSeq = 0
+
+func pngData(of cg: CGImage) -> Data? {
+    let data = NSMutableData()
+    guard let dest = CGImageDestinationCreateWithData(data, "public.png" as CFString, 1, nil)
+    else { return nil }
+    CGImageDestinationAddImage(dest, cg, nil)
+    return CGImageDestinationFinalize(dest) ? (data as Data) : nil
+}
+
+func scaled(_ cg: CGImage, maxDim: Int) -> CGImage {
+    let longSide = max(cg.width, cg.height)
+    if maxDim <= 0 || longSide <= maxDim { return cg }
+    let ratio = Double(maxDim) / Double(longSide)
+    let w = max(Int(Double(cg.width) * ratio), 1)
+    let h = max(Int(Double(cg.height) * ratio), 1)
+    guard let ctx = CGContext(data: nil, width: w, height: h,
+                              bitsPerComponent: cg.bitsPerComponent,
+                              bytesPerRow: 0, space: cg.colorSpace ?? CGColorSpaceCreateDeviceRGB(),
+                              bitmapInfo: cg.bitmapInfo.rawValue) else { return cg }
+    ctx.interpolationQuality = .high
+    ctx.draw(cg, in: CGRect(x: 0, y: 0, width: w, height: h))
+    return ctx.makeImage() ?? cg
+}
+
+// Full-screen capture of the main display via ScreenCaptureKit.
+func captureDesktop(maxDim: Int) -> (b64: String, width: Int, height: Int)? {
+    var result: (b64: String, width: Int, height: Int)? = nil
+    let sem = DispatchSemaphore(value: 0)
+    Task {
+        defer { sem.signal() }
+        do {
+            let content = try await SCShareableContent.excludingDesktopWindows(
+                false, onScreenWindowsOnly: true)
+            guard let display = content.displays.first else { return }
+            let filter = SCContentFilter(display: display, excludingWindows: [])
+            let cfg = SCStreamConfiguration()
+            cfg.width = max(Int(display.width), 1)
+            cfg.height = max(Int(display.height), 1)
+            cfg.showsCursor = false
+            cfg.captureResolution = .best
+            let cg = try await SCScreenshotManager.captureImage(
+                contentFilter: filter, configuration: cfg)
+            let img = scaled(cg, maxDim: maxDim)
+            if let data = pngData(of: img) {
+                result = (data.base64EncodedString(), img.width, img.height)
+            }
+        } catch {
+            result = nil
+        }
+    }
+    sem.wait()
+    return result
+}
+
+func getDesktopState(id: Any, args: [String: Any]) {
+    let maxDim = intArg(args, "max_image_dimension")
+    guard let shot = captureDesktop(maxDim: maxDim) else {
+        toolError(id: id, "can-helper: desktop capture failed (screen recording permission for this process?)"); return
+    }
+    captureSeq += 1
+    // True display size from the display mode (the image itself may have
+    // been downscaled to max_image_dimension).
+    var screenW = shot.width, screenH = shot.height
+    if let mode = CGDisplayCopyDisplayMode(CGMainDisplayID()) {
+        screenW = mode.pixelWidth
+        screenH = mode.pixelHeight
+    }
+    let sc: [String: Any] = [
+        "screenshot_width": shot.width,
+        "screenshot_height": shot.height,
+        "screen_width": screenW,
+        "screen_height": screenH,
+        "screenshot_mime_type": "image/png",
+        "capture_id": "cap-\(captureSeq)",
+    ]
+    send(["jsonrpc": "2.0", "id": id, "result": [
+        "content": [["type": "image", "data": shot.b64, "mimeType": "image/png"]],
+        "structuredContent": sc,
+        "isError": false,
+    ]])
+}
+
 // ---------- dispatch ----------
 
 func handleToolsCall(id: Any, params: [String: Any]) {
@@ -388,8 +595,16 @@ func handleToolsCall(id: Any, params: [String: Any]) {
         getWindowState(id: id, args: args)
     case "click":
         clickElement(id: id, args: args)
+    case "type_text":
+        typeText(id: id, args: args)
+    case "set_value":
+        setValue(id: id, args: args)
+    case "press_key":
+        pressKey(id: id, args: args)
+    case "get_desktop_state":
+        getDesktopState(id: id, args: args)
     default:
-        toolError(id: id, "can-helper milestone 2: tool '\(name)' is not implemented yet")
+        toolError(id: id, "can-helper milestone 3: tool '\(name)' is not implemented yet")
     }
 }
 

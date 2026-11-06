@@ -63,6 +63,7 @@ Semantics the agent relies on (must be preserved):
    Note: screenshots use ScreenCaptureKit — `CGWindowListCreateImage`
    is unavailable in current SDKs.)
 3. `type_text` / `set_value` / `press_key`, `get_desktop_state`.
+   (Implementation pushed; Mac verification pending.)
 4. Pixel `click` / `drag` / `zoom` (+ `from_zoom`).
 5. Swap-in acceptance: point the agent's `cuaPath` at the helper and run
    the full battery — calculator structural (42 / 60), batch, pixel

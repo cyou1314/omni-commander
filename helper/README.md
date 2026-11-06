@@ -40,4 +40,7 @@ Milestone 2 (verified on the owner's Mac, 2026-11-06): `get_window_state`
 (elements + tokens + tree text + optional window screenshot via
 ScreenCaptureKit) and `click` by element token — see `smoke_m2.py` for
 the end-to-end driver used in verification.
+Milestone 3: `type_text`, `set_value`, `press_key`, `get_desktop_state`
+(full-screen ScreenCaptureKit capture with optional downscale) — see
+`smoke_m3.py`.
 Later verbs answer with an explicit "not implemented yet" error.
