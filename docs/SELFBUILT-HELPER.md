@@ -103,3 +103,37 @@ Semantics the agent relies on (must be preserved):
 
 Windows parity is a separate later step (UIA); the macOS helper ships
 first because that is the machine Can runs on today.
+
+## Integration: Can.app bundle identity + helper 0.5.1 (2026-11-06)
+
+launchd no longer starts node directly. `com.can.agent` runs the
+supervisor inside `~/Applications/Can.app` (`app/supervisor.swift`: it
+spawns node on agent.js, restarts it after crashes, forwards SIGTERM);
+the supervisor is the process at the root of the agent chain, so TCC
+attributes the whole chain to the bundle `com.can.agent`. The bundle
+holds only the supervisor, the icon and Info.plist — its content is
+frozen, so its ad-hoc CDHash (`32c636d70955f2972c6c4ead87d040384fa04903`)
+never changes when agent.js or the helper binary are updated, and the
+grants survive updates. agent.js and the helper binary stay in
+`~/can-agent` (the agent's state lives next to them; the signed bundle
+is not writable state storage). node remains an external runtime.
+
+Grants (both obtained 2026-11-06, verified by a full battery through
+the live agent: snapshot, window + fullscreen captures, ref clicks,
+batch 7×6=42, ego batch):
+
+- Accessibility: the helper's own prompt registered "Can" (bundle) in
+  the list; the owner flipped it on.
+- Screen Recording: `CGRequestScreenCaptureAccess` did NOT register a
+  list entry under the bundle identity in practice (AX registration
+  worked, screen did not). The entry was added with the Settings
+  picker's "+" button pointing at Can.app itself; picker-added screen
+  entries start enabled. Helper 0.5.1 still calls
+  `ensureScreenAccess()` before captures (preflight + prompt once per
+  process) so the request is always made; on this OS the picker add is
+  the reliable path.
+- Cleanup: the stale Accessibility entry for the bare helper FILE was
+  removed from the list (the two "Can" rows are distinguishable by
+  icon: generic EXEC icon = file entry, Can icon = bundle). node keeps
+  its own entries (shared with other tools). Pre-switch bundle backups
+  were moved to the Trash.
