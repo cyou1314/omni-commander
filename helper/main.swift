@@ -237,15 +237,15 @@ func getWindowState(id: Any, args: [String: Any]) {
     let pid = intArg(args, "pid")
     let wid = intArg(args, "window_id")
     if pid == 0 || wid == 0 {
-        toolError(id, "get_window_state needs pid and window_id"); return
+        toolError(id: id, "get_window_state needs pid and window_id"); return
     }
     if !AXIsProcessTrusted() {
-        toolError(id, "can-helper: accessibility permission is not granted for this process "
+        toolError(id: id, "can-helper: accessibility permission is not granted for this process "
             + "(AXIsProcessTrusted=false); grant the helper in System Settings > "
             + "Privacy & Security > Accessibility, then retry"); return
     }
     guard let win = findAXWindow(pid: pid, windowId: wid) else {
-        toolError(id, "can-helper: no accessibility window found for pid \(pid), window_id \(wid)"); return
+        toolError(id: id, "can-helper: no accessibility window found for pid \(pid), window_id \(wid)"); return
     }
 
     let (nodes, walkTruncated) = walkTree(root: win, maxNodes: 3000, maxDepth: 60)
@@ -316,7 +316,7 @@ func getWindowState(id: Any, args: [String: Any]) {
 }
 
 func captureWindowPNG(windowId: Int) -> (b64: String, width: Int, height: Int)? {
-    guard let cg = CGWindowListCreateImage(.null, .optionFromWindow,
+    guard let cg = CGWindowListCreateImage(.null, .optionIncludingWindow,
                                            CGWindowID(windowId), [.bestResolution]) else { return nil }
     let data = NSMutableData()
     guard let dest = CGImageDestinationCreateWithData(data, "public.png" as CFString, 1, nil) else { return nil }
@@ -327,15 +327,15 @@ func captureWindowPNG(windowId: Int) -> (b64: String, width: Int, height: Int)? 
 
 func clickElement(id: Any, args: [String: Any]) {
     guard let token = args["element_token"] as? String, !token.isEmpty else {
-        toolError(id, "can-helper milestone 2: click needs an element_token "
+        toolError(id: id, "can-helper milestone 2: click needs an element_token "
             + "(pixel coordinate clicks land in milestone 4)"); return
     }
     guard let el = tokenRegistry[token] else {
-        toolError(id, "can-helper: unknown or stale element_token '\(token)'; take a fresh snapshot"); return
+        toolError(id: id, "can-helper: unknown or stale element_token '\(token)'; take a fresh snapshot"); return
     }
     let err = AXUIElementPerformAction(el, kAXPressAction as CFString)
     if err != .success {
-        toolError(id, "can-helper: AX press failed for token '\(token)' (AXError \(err.rawValue))"); return
+        toolError(id: id, "can-helper: AX press failed for token '\(token)' (AXError \(err.rawValue))"); return
     }
     toolResult(id: id, structured: [String: Any](), text: "{}")
 }
