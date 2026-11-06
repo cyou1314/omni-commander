@@ -27,7 +27,7 @@ import ApplicationServices
 import ImageIO
 import ScreenCaptureKit
 
-let HELPER_VERSION = "0.3.0"
+let HELPER_VERSION = "0.3.1"
 
 // ---------- tiny JSON helpers ----------
 
@@ -434,7 +434,11 @@ func typeText(id: Any, args: [String: Any]) {
             toolError(id: id, "can-helper: element (role \(role)) cannot take keyboard focus"); return
         }
     }
-    Thread.sleep(forTimeInterval: 0.05)
+    // Let the window actually become key before posting: events posted
+    // to the pid are routed to the app's key window at delivery time,
+    // and a just-raised window may not be key yet (text then lands in
+    // another window of the same app or nowhere).
+    Thread.sleep(forTimeInterval: 0.2)
     for ch in text { postUnicodeChar(pid: pid, ch: ch) }
     Thread.sleep(forTimeInterval: 0.05)
     toolResult(id: id, structured: [String: Any](), text: "{}")

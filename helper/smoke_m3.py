@@ -129,10 +129,20 @@ try:
         raise SystemExit(1)
     print(f"    textedit window: pid={pid} window_id={wid}")
 
+    # Normalize first: the found document may be a leftover from an
+    # earlier run with content in it.
+    tool("set_value", {"pid": pid, "window_id": wid,
+                       "element_token": area["element_token"], "value": ""})
+    area = next((e for e in snapshot(pid, wid) if e.get("role") == "AXTextArea"), area)
+
     tool("type_text", {"pid": pid, "window_id": wid,
                        "element_token": area["element_token"], "text": "can m3 type"})
     area2 = next((e for e in snapshot(pid, wid) if e.get("role") == "AXTextArea"), None)
     val2 = (area2 or {}).get("value", "")
+    if "can m3 type" not in val2:
+        time.sleep(0.8)  # key delivery can lag; re-read once before failing
+        area2 = next((e for e in snapshot(pid, wid) if e.get("role") == "AXTextArea"), None)
+        val2 = (area2 or {}).get("value", "")
     check("type_text landed", "can m3 type" in val2, f"value={val2[:60]!r}")
 
     tool("set_value", {"pid": pid, "window_id": wid,
