@@ -382,7 +382,19 @@ func tokenElement(_ args: [String: Any]) -> AXUIElement? {
 }
 
 func focusElement(_ el: AXUIElement) -> Bool {
-    AXUIElementSetAttributeValue(el, kAXFocusedAttribute as CFString, kCFBooleanTrue) == .success
+    // Make the element's window the app's main/focused window first —
+    // after programmatic value writes some apps drop first-responder,
+    // and key events posted to the pid then land nowhere. Then focus
+    // the element itself.
+    var winRef: AnyObject?
+    if AXUIElementCopyAttributeValue(el, kAXWindowAttribute as CFString, &winRef) == .success,
+       let anyWin = winRef,
+       CFGetTypeID(anyWin) == AXUIElementGetTypeID() {
+        let win = unsafeBitCast(anyWin, to: AXUIElement.self)
+        AXUIElementSetAttributeValue(win, kAXMainAttribute as CFString, kCFBooleanTrue)
+        AXUIElementSetAttributeValue(win, kAXFocusedAttribute as CFString, kCFBooleanTrue)
+    }
+    return AXUIElementSetAttributeValue(el, kAXFocusedAttribute as CFString, kCFBooleanTrue) == .success
 }
 
 func postKeyEvent(pid: Int, keyCode: CGKeyCode, down: Bool, flags: CGEventFlags) {
@@ -470,10 +482,19 @@ func pressKey(id: Any, args: [String: Any]) {
     let pid = intArg(args, "pid")
     let raw = ((args["key"] as? String) ?? "").lowercased()
     if raw.isEmpty { toolError(id: id, "can-helper: press_key needs a key"); return }
-    if let el = tokenElement(args) { _ = focusElement(el); Thread.sleep(forTimeInterval: 0.03) }
+    if let el = tokenElement(args) { _ = focusElement(el); Thread.sleep(forTimeInterval: 0.08) }
     let parts = raw.split(separator: "+").map { $0.trimmingCharacters(in: .whitespaces) }
     guard let keyName = parts.last, let code = keyCodes[keyName] else {
         toolError(id: id, "can-helper: unknown key '\(raw)'"); return
+    }
+    // A bare printable character goes out as a unicode event: a raw
+    // keycode event posted to another pid can be dropped when the
+    // target's first responder was reset by a programmatic value
+    // write, while the unicode path lands like typed text.
+    if parts.count == 1 && keyName.count == 1 {
+        postUnicodeChar(pid: pid, ch: keyName.first!)
+        toolResult(id: id, structured: [String: Any](), text: "{}")
+        return
     }
     var flags: CGEventFlags = []
     for mod in parts.dropLast() {
@@ -487,6 +508,7 @@ func pressKey(id: Any, args: [String: Any]) {
         }
     }
     postKeyEvent(pid: pid, keyCode: code, down: true, flags: flags)
+    Thread.sleep(forTimeInterval: 0.02)
     postKeyEvent(pid: pid, keyCode: code, down: false, flags: flags)
     toolResult(id: id, structured: [String: Any](), text: "{}")
 }
