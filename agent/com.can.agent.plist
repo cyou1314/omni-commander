@@ -6,8 +6,7 @@
   <string>com.can.agent</string>
   <key>ProgramArguments</key>
   <array>
-    <string>/Users/cyou/node/bin/node</string>
-    <string>/Users/cyou/can-agent/agent.js</string>
+    <string>/Users/cyou/Applications/Can.app/Contents/MacOS/Can</string>
   </array>
   <key>WorkingDirectory</key>
   <string>/Users/cyou/can-agent</string>
