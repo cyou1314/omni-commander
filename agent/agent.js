@@ -61,7 +61,7 @@ const STARTED = Date.now();
 const LOG = path.join(DIR, "agent.log");
 const STATUS = path.join(DIR, "status.json");
 const WRITELOG = path.join(DIR, "write-log.txt");
-const AGENT_VERSION = "0.11.0";
+const AGENT_VERSION = "0.11.1";
 
 function log(msg) {
   const line = `[${new Date().toISOString()}] ${msg}\n`;
@@ -704,6 +704,7 @@ let cuaSeq = 0;
 const cuaPending = new Map();
 let cuaReady = null;
 let deskLast = null; // { pid, window_id, app, title }
+let deskLastSnapshot = null; // { elements, window } — latest snapshot, seeds batch label resolution
 const deskSnaps = new Map(); // "pid:window_id" -> { tokens: Map<index, token> }
 
 function cuaSpawn() {
@@ -908,6 +909,7 @@ async function toolDesktopSnapshot(args) {
     app: win.app || (deskLast && deskLast.app) || "",
     title: win.title || (deskLast && deskLast.title) || "",
   };
+  deskLastSnapshot = { elements: out, window: { pid: win.pid, window_id: win.window_id } };
   return JSON.stringify({
     window: { pid: win.pid, window_id: win.window_id, app: deskLast.app, title: deskLast.title },
     count: out.length, truncated: Boolean(r.truncated),
@@ -969,10 +971,13 @@ async function toolDesktopBatch(args) {
   const steps = Array.isArray(args && args.steps) ? args.steps.slice(0, 12) : [];
   if (!steps.length) throw new Error("steps must be a non-empty array");
   const out = [];
-  let lastSnapshot = null;
+  // Seed from the latest standalone snapshot so a batch can resolve labels
+  // right after a separate can_desktop_snapshot call; in-batch snapshot
+  // steps still replace it as the batch progresses.
+  let lastSnapshot = deskLastSnapshot;
   // click/type steps may name an element by its visible label instead of a
-  // ref; resolve against the latest in-batch snapshot so the model can plan
-  // a whole sequence in one call without knowing refs in advance.
+  // ref; resolve against the latest snapshot so the model can plan a whole
+  // sequence in one call without knowing refs in advance.
   const resolveRef = (s) => {
     if (s.ref) return s.ref;
     if (!s.label || !lastSnapshot) return s.ref;
@@ -980,6 +985,19 @@ async function toolDesktopBatch(args) {
     const want = String(s.label);
     const hit = els.find((e) => e.label === want) || els.find((e) => e.label && e.label.includes(want));
     return hit ? hit.ref : s.ref;
+  };
+  // Labels go stale as app state changes (e.g. Calculator's clear button
+  // flips between 全部清除 and 清除); on a miss, refresh the snapshot once
+  // and retry before giving up.
+  const resolveRefWithRefresh = async (s) => {
+    let ref = resolveRef(s);
+    if (!ref && s.label) {
+      try {
+        lastSnapshot = JSON.parse(await toolDesktopSnapshot({}));
+        ref = resolveRef(s);
+      } catch (_) { /* keep the miss; the error path lists current labels */ }
+    }
+    return ref;
   };
   for (let i = 0; i < steps.length; i++) {
     const s = steps[i] || {};
@@ -992,7 +1010,7 @@ async function toolDesktopBatch(args) {
         lastSnapshot = JSON.parse(await toolDesktopSnapshot(s));
         out.push({ step: i, op, ok: true, count: lastSnapshot.count });
       } else if (op === "click") {
-        const ref = resolveRef(s);
+        const ref = await resolveRefWithRefresh(s);
         if (!ref) {
           const labels = ((lastSnapshot && lastSnapshot.elements) || []).map((e) => e.label).filter(Boolean).slice(0, 40).join(" | ");
           throw new Error("click step needs a ref or a label matching the last snapshot" + (s.label ? ` (no element labelled "${s.label}")` : "") + (labels ? `; available labels: ${labels}` : ""));
@@ -1000,7 +1018,7 @@ async function toolDesktopBatch(args) {
         await toolDesktopClick({ ...s, ref });
         out.push({ step: i, op, ok: true, ref });
       } else if (op === "type") {
-        const ref = resolveRef(s);
+        const ref = await resolveRefWithRefresh(s);
         await toolDesktopType(ref ? { ...s, ref } : s);
         out.push({ step: i, op, ok: true, ref: ref || undefined });
       } else if (op === "key") {
