@@ -62,8 +62,14 @@ Semantics the agent relies on (must be preserved):
    readout to 7; the ScreenCaptureKit window shot came back inline.
    Note: screenshots use ScreenCaptureKit — `CGWindowListCreateImage`
    is unavailable in current SDKs.)
-3. `type_text` / `set_value` / `press_key`, `get_desktop_state`.
-   (Implementation pushed; Mac verification pending.)
+3. ✅ `type_text` / `set_value` / `press_key`, `get_desktop_state`.
+   (Verified on the owner's Mac 2026-11-06, helper 0.3.1, `smoke_m3.py`:
+   typed text, direct value write and a bare-character key all landed in
+   TextEdit; full-screen capture returned 1512×982 pt with the true
+   3024×1964 screen size and a capture_id. Two focus lessons baked in:
+   focus the element's window (main+focused) before posting keys, and
+   give the window a beat to become key — events posted to a pid are
+   routed to whichever window is key at delivery time.)
 4. Pixel `click` / `drag` / `zoom` (+ `from_zoom`).
 5. Swap-in acceptance: point the agent's `cuaPath` at the helper and run
    the full battery — calculator structural (42 / 60), batch, pixel

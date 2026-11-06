@@ -42,5 +42,5 @@ ScreenCaptureKit) and `click` by element token — see `smoke_m2.py` for
 the end-to-end driver used in verification.
 Milestone 3: `type_text`, `set_value`, `press_key`, `get_desktop_state`
 (full-screen ScreenCaptureKit capture with optional downscale) — see
-`smoke_m3.py`.
+`smoke_m3.py`. Verified on the owner's Mac 2026-11-06 (helper 0.3.1).
 Later verbs answer with an explicit "not implemented yet" error.
