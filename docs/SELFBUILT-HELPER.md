@@ -70,7 +70,8 @@ Semantics the agent relies on (must be preserved):
    focus the element's window (main+focused) before posting keys, and
    give the window a beat to become key — events posted to a pid are
    routed to whichever window is key at delivery time.)
-4. Pixel `click` / `drag` / `zoom` (+ `from_zoom`).
+4. Pixel `click` / `drag` / `zoom` (+ `from_zoom`). (Implementation
+   pushed; Mac verification pending.)
 5. Swap-in acceptance: point the agent's `cuaPath` at the helper and run
    the full battery — calculator structural (42 / 60), batch, pixel
    (7 → zoom → 8 = 78), Notes read — with Cua still installed as the

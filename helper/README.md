@@ -43,4 +43,7 @@ the end-to-end driver used in verification.
 Milestone 3: `type_text`, `set_value`, `press_key`, `get_desktop_state`
 (full-screen ScreenCaptureKit capture with optional downscale) — see
 `smoke_m3.py`. Verified on the owner's Mac 2026-11-06 (helper 0.3.1).
+Milestone 4: pixel `click` / `drag` / `zoom` in window, desktop and
+from_zoom spaces, and a window-relative `frame` on every element — see
+`smoke_m4.py`.
 Later verbs answer with an explicit "not implemented yet" error.
