@@ -31,7 +31,7 @@ import ApplicationServices
 import ImageIO
 import ScreenCaptureKit
 
-let HELPER_VERSION = "0.4.0"
+let HELPER_VERSION = "0.4.1"
 
 // ---------- tiny JSON helpers ----------
 
@@ -501,13 +501,17 @@ func pixelPoint(args: [String: Any], xKey: String, yKey: String) -> (pid: Int, p
 }
 
 func postMouse(pid: Int, point: CGPoint, type: CGEventType) {
+    // Mouse events go to the HID tap, always: events posted to a pid
+    // are silently ignored by many apps' mouse handling (verified on
+    // Calculator in the milestone-4 smoke — pid-posted clicks landed
+    // nowhere, the same click via the HID tap worked). Keyboard events
+    // are the opposite: they are routed per-pid (milestone 3). A pixel
+    // click therefore lands on whatever is visually on top at that
+    // screen point, exactly like the old driver's.
+    _ = pid
     guard let ev = CGEvent(mouseEventSource: nil, mouseType: type,
                            mouseCursorPosition: point, mouseButton: .left) else { return }
-    if pid > 0 {
-        ev.postToPid(pid_t(pid))
-    } else {
-        ev.post(tap: .cghidEventTap)
-    }
+    ev.post(tap: .cghidEventTap)
 }
 
 func mouseClick(pid: Int, point: CGPoint) {
@@ -526,6 +530,10 @@ func dragTool(id: Any, args: [String: Any]) {
     let pid = from.pid != 0 ? from.pid : to.pid
     let duration = max(doubleArg(args, "duration_ms"), 50) / 1000.0
     let steps = 12
+    // Arrive at the start point first: some drag tracking only arms
+    // once the cursor has been seen at the grab point.
+    postMouse(pid: pid, point: from.point, type: .mouseMoved)
+    Thread.sleep(forTimeInterval: 0.05)
     postMouse(pid: pid, point: from.point, type: .leftMouseDown)
     for i in 1...steps {
         let t = Double(i) / Double(steps)
