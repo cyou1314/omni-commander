@@ -20,6 +20,7 @@ import Foundation
 import CoreGraphics
 import ApplicationServices
 import ImageIO
+import ScreenCaptureKit
 
 let HELPER_VERSION = "0.2.0"
 
@@ -315,14 +316,42 @@ func getWindowState(id: Any, args: [String: Any]) {
     ]])
 }
 
+// Window capture goes through ScreenCaptureKit: the legacy
+// CGWindowListCreateImage API is unavailable in current SDKs. SCK is
+// async, so bridge it with a semaphore. Any failure (above all: the
+// Screen Recording permission not being granted to this process) comes
+// back as nil and the caller reports screenshot_error instead.
 func captureWindowPNG(windowId: Int) -> (b64: String, width: Int, height: Int)? {
-    guard let cg = CGWindowListCreateImage(.null, .optionIncludingWindow,
-                                           CGWindowID(windowId), [.bestResolution]) else { return nil }
-    let data = NSMutableData()
-    guard let dest = CGImageDestinationCreateWithData(data, "public.png" as CFString, 1, nil) else { return nil }
-    CGImageDestinationAddImage(dest, cg, nil)
-    if !CGImageDestinationFinalize(dest) { return nil }
-    return (data.base64EncodedString(), cg.width, cg.height)
+    var result: (b64: String, width: Int, height: Int)? = nil
+    let sem = DispatchSemaphore(value: 0)
+    Task {
+        defer { sem.signal() }
+        do {
+            let content = try await SCShareableContent.excludingDesktopWindows(
+                false, onScreenWindowsOnly: false)
+            guard let win = content.windows.first(where: { $0.windowID == CGWindowID(windowId) })
+            else { return }
+            let filter = SCContentFilter(desktopIndependentWindow: win)
+            let cfg = SCStreamConfiguration()
+            cfg.width = max(Int(win.frame.width), 1)
+            cfg.height = max(Int(win.frame.height), 1)
+            cfg.showsCursor = false
+            cfg.captureResolution = .best
+            let cg = try await SCScreenshotManager.captureImage(
+                contentFilter: filter, configuration: cfg)
+            let data = NSMutableData()
+            guard let dest = CGImageDestinationCreateWithData(
+                data, "public.png" as CFString, 1, nil) else { return }
+            CGImageDestinationAddImage(dest, cg, nil)
+            if CGImageDestinationFinalize(dest) {
+                result = (data.base64EncodedString(), cg.width, cg.height)
+            }
+        } catch {
+            result = nil
+        }
+    }
+    sem.wait()
+    return result
 }
 
 func clickElement(id: Any, args: [String: Any]) {
