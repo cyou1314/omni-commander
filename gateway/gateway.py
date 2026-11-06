@@ -56,7 +56,7 @@ from mcp.server.auth.settings import (
 from mcp.server.fastmcp import FastMCP
 from mcp.server.transport_security import TransportSecuritySettings
 from mcp.shared.auth import OAuthClientInformationFull, OAuthToken
-from mcp.types import CallToolResult, ImageContent, TextContent, ToolAnnotations
+from mcp.types import CallToolResult, Icon, ImageContent, TextContent, ToolAnnotations
 from pydantic import AnyHttpUrl
 from starlette.requests import Request
 from starlette.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse, Response
@@ -207,6 +207,7 @@ provider = CanProvider()
 
 mcp = FastMCP(
     "Can",
+    icons=[Icon(src=PUBLIC_URL + "/icon-256.png", mimeType="image/png", sizes=["256x256"])],
     host="127.0.0.1",
     port=PORT,
     streamable_http_path="/mcp",
