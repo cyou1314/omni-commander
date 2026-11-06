@@ -12,8 +12,12 @@ reports (deterministic, no vision needed):
      (NO snapshot between zoom and the from_zoom click — a snapshot
      replaces the zoom context by design)
   -> desktop pixel click on "9" (capture_id bound) -> readout 789
-  -> desktop drag of the title bar (+70,+50) -> window moved
+  -> desktop drag of a TextEdit title bar (+70,+50) -> window moved
   -> drag it back -> window home again
+     (drag subject is TextEdit, not Calculator: the macOS 27
+     Calculator window exposes no drag region at its top/edges —
+     probed at three grab points, all zero — while a standard title
+     bar drags exactly. Same desktop-drag mechanism under test.)
 
 Usage: python3 smoke_m4.py [path-to-can-helper]
 """
@@ -175,23 +179,40 @@ try:
     _, readout, _ = snapshot(pid, wid)
     check("desktop click 9", readout == "789", f"readout={readout!r}")
 
-    # Desktop drag: move the window by its title bar, then back.
+    # Desktop drag: move a TextEdit window by its (standard) title
+    # bar, then back. Calculator's own window has no drag region.
+    tool("launch_app", {"bundle_id": "com.apple.TextEdit"})
+    time.sleep(0.8)
+    wins = sc_of(tool("list_windows", {})).get("windows") or []
+    edits = [w for w in wins if "TextEdit" in str(w.get("app_name", ""))
+             or "文本编辑" in str(w.get("app_name", ""))]
+    edits.sort(key=lambda w: 0 if w.get("is_on_screen") else 1)
+    check("drag subject window", len(edits) > 0)
+    if not edits:
+        raise SystemExit(1)
+    bounds = edits[0].get("bounds") or {}
+
+    def edit_bounds():
+        ws = sc_of(tool("list_windows", {})).get("windows") or []
+        for w in ws:
+            if w.get("window_id") == edits[0]["window_id"]:
+                return w.get("bounds") or {}
+        return {}
+
     tx = bounds["x"] + bounds["width"] / 2
-    ty = bounds["y"] + 11
+    ty = bounds["y"] + 12
     tool("drag", {"scope": "desktop", "from_x": tx, "from_y": ty,
-                  "to_x": tx + 70, "to_y": ty + 50, "duration_ms": 700})
+                  "to_x": tx + 70, "to_y": ty + 50, "duration_ms": 800})
     time.sleep(0.4)
-    moved = calc_window()
-    mb = (moved or {}).get("bounds") or {}
+    mb = edit_bounds()
     dx = mb.get("x", 0) - bounds["x"]
     dy = mb.get("y", 0) - bounds["y"]
     check("drag moved window", abs(dx - 70) <= 10 and abs(dy - 50) <= 10,
           f"delta=({dx:.0f},{dy:.0f})")
     tool("drag", {"scope": "desktop", "from_x": tx + 70, "from_y": ty + 50,
-                  "to_x": tx, "to_y": ty, "duration_ms": 700})
+                  "to_x": tx, "to_y": ty, "duration_ms": 800})
     time.sleep(0.4)
-    home = calc_window()
-    hb = (home or {}).get("bounds") or {}
+    hb = edit_bounds()
     check("drag back home", abs(hb.get("x", 0) - bounds["x"]) <= 10
           and abs(hb.get("y", 0) - bounds["y"]) <= 10,
           f"home=({hb.get('x')},{hb.get('y')}) vs ({bounds['x']},{bounds['y']})")
