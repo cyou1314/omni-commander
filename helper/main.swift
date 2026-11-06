@@ -31,7 +31,7 @@ import ApplicationServices
 import ImageIO
 import ScreenCaptureKit
 
-let HELPER_VERSION = "0.4.1"
+let HELPER_VERSION = "0.4.2"
 
 // ---------- tiny JSON helpers ----------
 
@@ -110,6 +110,32 @@ func windowBounds(windowId: Int) -> CGRect? {
     return nil
 }
 
+// Resolve an app that is already running, matching by bundle id, by its
+// localized name (计算器) or by its bundle name (Calculator). CG window
+// owner names are localized, so name-only matching across locales was
+// the one rough edge of the swap-in: the agent asks in English, the
+// window list answers in Chinese, and neither side is wrong.
+func runningApp(name: String, bundleId: String) -> NSRunningApplication? {
+    let apps = NSWorkspace.shared.runningApplications
+    if !bundleId.isEmpty {
+        return apps.first { $0.bundleIdentifier == bundleId }
+    }
+    let q = name.lowercased()
+    if q.isEmpty { return nil }
+    return apps.first { app in
+        if (app.localizedName ?? "").lowercased() == q { return true }
+        if let url = app.bundleURL, let b = Bundle(url: url) {
+            if (b.object(forInfoDictionaryKey: "CFBundleName") as? String ?? "").lowercased() == q { return true }
+            if (b.bundleIdentifier ?? "").lowercased() == q { return true }
+        }
+        return false
+    }
+}
+
+func windowsOf(pid: Int) -> [[String: Any]] {
+    return listWindows().filter { ($0["pid"] as? Int) == pid }
+}
+
 func launchApp(args: [String: Any]) -> (ok: Bool, message: String) {
     let name = (args["app_name"] as? String) ?? (args["app"] as? String)
         ?? (args["name"] as? String) ?? ""
@@ -117,8 +143,15 @@ func launchApp(args: [String: Any]) -> (ok: Bool, message: String) {
     if name.isEmpty && bundleId.isEmpty {
         return (false, "launch_app needs app_name or bundle_id")
     }
-    // Delegate resolution to LaunchServices through open(1): it handles
-    // localized names, bundle ids and already-running apps uniformly.
+    // Already running (the common case): report its windows by pid,
+    // without depending on how LaunchServices feels about the name.
+    if let app = runningApp(name: name, bundleId: bundleId) {
+        let pid = Int(app.processIdentifier)
+        return (true, jsonString(["launched": true, "app": name, "pid": pid,
+                                  "windows": windowsOf(pid: pid)]))
+    }
+    // Delegate cold resolution to LaunchServices through open(1): it
+    // handles bundle ids and English names uniformly.
     let proc = Process()
     proc.executableURL = URL(fileURLWithPath: "/usr/bin/open")
     proc.arguments = bundleId.isEmpty ? ["-a", name] : ["-b", bundleId]
@@ -131,14 +164,24 @@ func launchApp(args: [String: Any]) -> (ok: Bool, message: String) {
     if proc.terminationStatus != 0 {
         return (false, "launch_app could not open \(bundleId.isEmpty ? name : bundleId)")
     }
-    // Give the app a moment to create its window, then report what we see.
-    Thread.sleep(forTimeInterval: 0.6)
-    let wins = listWindows().filter {
-        let appName = ($0["app_name"] as? String ?? "")
-        return name.isEmpty || appName.localizedCaseInsensitiveContains(name)
-            || name.localizedCaseInsensitiveContains(appName)
+    // Give the app a moment to appear, then report its windows by pid.
+    for _ in 0..<10 {
+        Thread.sleep(forTimeInterval: 0.3)
+        if let app = runningApp(name: name, bundleId: bundleId) {
+            let pid = Int(app.processIdentifier)
+            let wins = windowsOf(pid: pid)
+            if !wins.isEmpty {
+                return (true, jsonString(["launched": true, "app": name, "pid": pid,
+                                          "windows": wins]))
+            }
+        }
     }
-    return (true, jsonString(["launched": true, "app": name, "windows": wins]))
+    if let app = runningApp(name: name, bundleId: bundleId) {
+        let pid = Int(app.processIdentifier)
+        return (true, jsonString(["launched": true, "app": name, "pid": pid,
+                                  "windows": windowsOf(pid: pid)]))
+    }
+    return (true, jsonString(["launched": true, "app": name, "windows": []]))
 }
 
 // ---------- accessibility helpers (milestone 2) ----------
