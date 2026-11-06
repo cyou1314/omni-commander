@@ -3,7 +3,8 @@
 
 Story, against TextEdit:
   initialize -> start_session -> launch_app (bundle id, dodges the
-  localized name) -> list_windows -> get_window_state
+  localized name) -> find a document window (if TextEdit shows its
+  start picker, click its New Document button first)
   -> type_text into the text area -> state (text must be there)
   -> set_value a different text -> state (value must have changed)
   -> set_value "" -> press_key "x" with the element token -> state
@@ -17,6 +18,7 @@ Usage: python3 smoke_m3.py [path-to-can-helper]
 import json
 import subprocess
 import sys
+import time
 
 HELPER = sys.argv[1] if len(sys.argv) > 1 else "./can-helper"
 
@@ -65,12 +67,47 @@ def check(label, ok, detail=""):
         failures.append(label)
 
 
-def text_area_state(pid, wid):
+def snapshot(pid, wid):
     r = tool("get_window_state", {"pid": pid, "window_id": wid,
                                   "tree_format": "both", "include_screenshot": False})
-    elements = sc_of(r).get("elements") or []
-    area = next((e for e in elements if e.get("role") == "AXTextArea"), None)
-    return area, elements
+    return sc_of(r).get("elements") or []
+
+
+def textedit_windows():
+    wins = sc_of(tool("list_windows", {})).get("windows") or []
+    edit = [w for w in wins if "TextEdit" in str(w.get("app_name", ""))
+            or "文本编辑" in str(w.get("app_name", ""))]
+    edit.sort(key=lambda w: 0 if w.get("is_on_screen") else 1)
+    return edit, len(wins)
+
+
+def find_text_area():
+    """Return (pid, wid, area_element) for a TextEdit document window,
+    clicking the start picker's New Document button if needed."""
+    for attempt in range(3):
+        edit, total = textedit_windows()
+        if attempt == 0:
+            print(f"    {total} windows total, {len(edit)} TextEdit")
+        for w in edit:
+            elements = snapshot(w["pid"], w["window_id"])
+            area = next((e for e in elements if e.get("role") == "AXTextArea"), None)
+            if area is not None:
+                return w["pid"], w["window_id"], area, elements
+            if attempt == 0 and w is edit[0]:
+                roles = sorted({e.get("role", "?") for e in elements})
+                print(f"    window {w['window_id']} roles: {roles}")
+            new_btn = next((e for e in elements
+                            if e.get("role") == "AXButton"
+                            and ("新建" in str(e.get("label", ""))
+                                 or "New" in str(e.get("label", "")))), None)
+            if new_btn is not None:
+                print(f"    clicking new-document button {new_btn.get('label')!r}")
+                tool("click", {"pid": w["pid"], "window_id": w["window_id"],
+                               "element_token": new_btn["element_token"],
+                               "action": "press"})
+                time.sleep(1.2)
+                break  # re-list windows and retry
+    return None, None, None, []
 
 
 try:
@@ -83,40 +120,33 @@ try:
 
     tool("launch_app", {"bundle_id": "com.apple.TextEdit"})
     check("launch_app TextEdit", True)
+    time.sleep(0.8)
 
-    wins = sc_of(tool("list_windows", {})).get("windows") or []
-    edit = [w for w in wins if "TextEdit" in str(w.get("app_name", ""))
-            or "文本编辑" in str(w.get("app_name", ""))]
-    check("list_windows finds TextEdit", len(edit) > 0, f"{len(wins)} windows total")
-    if not edit:
-        raise SystemExit(1)
-    win = next((w for w in edit if w.get("is_on_screen")), edit[0])
-    pid, wid = win["pid"], win["window_id"]
-    print(f"    textedit window: pid={pid} window_id={wid} app={win.get('app_name')}")
-
-    area, elements = text_area_state(pid, wid)
-    check("text area found", area is not None, f"{len(elements)} elements")
+    pid, wid, area, elements = find_text_area()
+    check("text area found", area is not None,
+          f"{len(elements)} elements in last snapshot")
     if area is None:
         raise SystemExit(1)
+    print(f"    textedit window: pid={pid} window_id={wid}")
 
     tool("type_text", {"pid": pid, "window_id": wid,
                        "element_token": area["element_token"], "text": "can m3 type"})
-    area2, _ = text_area_state(pid, wid)
+    area2 = next((e for e in snapshot(pid, wid) if e.get("role") == "AXTextArea"), None)
     val2 = (area2 or {}).get("value", "")
     check("type_text landed", "can m3 type" in val2, f"value={val2[:60]!r}")
 
     tool("set_value", {"pid": pid, "window_id": wid,
                        "element_token": area2["element_token"], "value": "can m3 set"})
-    area3, _ = text_area_state(pid, wid)
+    area3 = next((e for e in snapshot(pid, wid) if e.get("role") == "AXTextArea"), None)
     val3 = (area3 or {}).get("value", "")
     check("set_value landed", val3 == "can m3 set", f"value={val3[:60]!r}")
 
     tool("set_value", {"pid": pid, "window_id": wid,
                        "element_token": area3["element_token"], "value": ""})
-    area4, _ = text_area_state(pid, wid)
+    area4 = next((e for e in snapshot(pid, wid) if e.get("role") == "AXTextArea"), None)
     tool("press_key", {"pid": pid, "window_id": wid,
                        "element_token": area4["element_token"], "key": "x"})
-    area5, _ = text_area_state(pid, wid)
+    area5 = next((e for e in snapshot(pid, wid) if e.get("role") == "AXTextArea"), None)
     val5 = (area5 or {}).get("value", "")
     check("press_key landed", val5 == "x", f"value={val5[:60]!r}")
 
