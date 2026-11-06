@@ -70,8 +70,14 @@ Semantics the agent relies on (must be preserved):
    focus the element's window (main+focused) before posting keys, and
    give the window a beat to become key — events posted to a pid are
    routed to whichever window is key at delivery time.)
-4. Pixel `click` / `drag` / `zoom` (+ `from_zoom`). (Implementation
-   pushed; Mac verification pending.)
+4. ✅ Pixel `click` / `drag` / `zoom` (+ `from_zoom`).
+   (Verified on the owner's Mac 2026-11-06, helper 0.4.1, `smoke_m4.py`:
+   the full pixel loop — AC → 7 → zoom → from_zoom 8 → 78 → desktop 9
+   → 789 — plus a title-bar drag forth and back. Two delivery lessons
+   baked in: mouse events must go to the HID tap (pid-posted mouse is
+   ignored by many apps; keyboard is the opposite), and the macOS 27
+   Calculator window exposes no drag region, so the drag check uses a
+   standard title bar — the mechanism is the same.)
 5. Swap-in acceptance: point the agent's `cuaPath` at the helper and run
    the full battery — calculator structural (42 / 60), batch, pixel
    (7 → zoom → 8 = 78), Notes read — with Cua still installed as the
