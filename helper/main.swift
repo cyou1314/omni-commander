@@ -31,7 +31,7 @@ import ApplicationServices
 import ImageIO
 import ScreenCaptureKit
 
-let HELPER_VERSION = "0.4.2"
+let HELPER_VERSION = "0.4.3"
 
 // ---------- tiny JSON helpers ----------
 
@@ -314,6 +314,19 @@ func walkTree(root: AXUIElement, maxNodes: Int, maxDepth: Int) -> (nodes: [Walke
     return (out, truncated)
 }
 
+var accessPrompted = false
+// As the agent's child the helper stands alone for TCC (no terminal
+// umbrella). Instead of making the owner hunt for the binary in Finder,
+// ask the system itself to register this process in the Accessibility
+// and Screen Recording lists, with its own dialogs. Once per process.
+func promptAccessOnce() {
+    if accessPrompted { return }
+    accessPrompted = true
+    let opts = [kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String: true] as CFDictionary
+    _ = AXIsProcessTrustedWithOptions(opts)
+    _ = CGRequestScreenCaptureAccess()
+}
+
 func getWindowState(id: Any, args: [String: Any]) {
     let pid = intArg(args, "pid")
     let wid = intArg(args, "window_id")
@@ -321,6 +334,7 @@ func getWindowState(id: Any, args: [String: Any]) {
         toolError(id: id, "get_window_state needs pid and window_id"); return
     }
     if !AXIsProcessTrusted() {
+        promptAccessOnce()
         toolError(id: id, "can-helper: accessibility permission is not granted for this process "
             + "(AXIsProcessTrusted=false); grant the helper in System Settings > "
             + "Privacy & Security > Accessibility, then retry"); return
@@ -924,6 +938,18 @@ func handle(line: String) {
 }
 
 // ---------- main ----------
+
+// One-shot mode: `Can authorize` asks the system to register this
+// binary in the permission lists (with dialogs), prints the current
+// status as JSON and exits. The agent's stdio mode is the default.
+if CommandLine.arguments.contains("authorize") {
+    promptAccessOnce()
+    print(jsonString([
+        "accessibility": AXIsProcessTrusted(),
+        "screen_recording": CGPreflightScreenCaptureAccess(),
+    ]))
+    exit(0)
+}
 
 // The plain stdin line loop is enough for the agent's request/response
 // pattern; AX calls are synchronous and same-process.
