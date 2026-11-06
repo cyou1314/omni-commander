@@ -31,7 +31,7 @@ import ApplicationServices
 import ImageIO
 import ScreenCaptureKit
 
-let HELPER_VERSION = "0.5.0"
+let HELPER_VERSION = "0.5.1"
 
 // ---------- tiny JSON helpers ----------
 
@@ -327,6 +327,15 @@ func promptAccessOnce() {
     _ = CGRequestScreenCaptureAccess()
 }
 
+// Screen capture has its own grant, separate from Accessibility: a
+// process can hold the AX grant and still be invisible in the Screen
+// Recording list until it actually asks. Ask (once per process)
+// whenever a capture is attempted without the grant, so the entry
+// registers itself instead of needing a manual file-picker add.
+func ensureScreenAccess() {
+    if !CGPreflightScreenCaptureAccess() { promptAccessOnce() }
+}
+
 func getWindowState(id: Any, args: [String: Any]) {
     let pid = intArg(args, "pid")
     let wid = intArg(args, "window_id")
@@ -406,6 +415,7 @@ func getWindowState(id: Any, args: [String: Any]) {
     var content: [[String: Any]] = [["type": "text", "text": treeText]]
 
     if let wantShot = args["include_screenshot"] as? Bool, wantShot {
+        ensureScreenAccess()
         if let img = captureWindowJPEG(windowId: wid) {
             sc["screenshot_width"] = img.width
             sc["screenshot_height"] = img.height
@@ -855,6 +865,7 @@ func captureDesktop(maxDim: Int) -> (b64: String, width: Int, height: Int)? {
 
 func getDesktopState(id: Any, args: [String: Any]) {
     let maxDim = intArg(args, "max_image_dimension")
+    ensureScreenAccess()
     guard let shot = captureDesktop(maxDim: maxDim) else {
         toolError(id: id, "Can: desktop capture failed (screen recording permission for this process?)"); return
     }
