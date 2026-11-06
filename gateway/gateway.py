@@ -638,6 +638,18 @@ async def can_ego_finish() -> str:
     return await relay_tool("can_ego_finish", {}, timeout=EGO_TIMEOUT)
 
 
+@mcp.tool(annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=True, idempotentHint=False))
+async def can_ego_batch(space: str, steps: list) -> str:
+    """Run a SEQUENCE of actions in the owner's daily browser in ONE call — much faster than the single-step ego tools, because the whole sequence runs in one browser session without a round trip per step. space is "can" or "user". steps is a list of: {"op":"open","url":"https://..."} | {"op":"snapshot"} | {"op":"click","target":"@21"} (target = snapshot ref or selector) | {"op":"type","target":"@21","text":"..."} | {"op":"wait","ms":800}. Max 12 steps; stops at the first failing step. Plan refs from an earlier snapshot in the same batch. This ACTS in the owner's logged-in browser."""
+    return await relay_tool("can_ego_batch", {"space": space, "steps": steps}, timeout=EGO_TIMEOUT)
+
+
+@mcp.tool(annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=True, idempotentHint=False))
+async def can_batch(steps: list) -> str:
+    """Run a SEQUENCE of Can tool calls in ONE call — the fastest way to do a multi-step job, because the steps execute back-to-back on the computer without a round trip per step. steps is a list of {"tool":"can_desktop_open_app","args":{"name":"Notes"}} objects; any Can tool except the image-returning ones (can_desktop_screenshot, can_desktop_window_shot, can_desktop_zoom) and can_batch itself may be used, including can_desktop_batch and can_ego_batch for nested sequences. Max 10 steps; stops at the first failing step and reports per-step results (long results are truncated). The safety fence and audit apply to each step exactly as if it had been called on its own."""
+    return await relay_tool("can_batch", {"steps": steps}, timeout=115)
+
+
 PAGE_CSS = """
 body{font-family:-apple-system,'PingFang SC','Microsoft YaHei',sans-serif;background:#eef0f4;
 color:#1c2330;display:flex;align-items:center;justify-content:center;min-height:100vh;margin:0}

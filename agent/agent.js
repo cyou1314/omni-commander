@@ -61,7 +61,7 @@ const STARTED = Date.now();
 const LOG = path.join(DIR, "agent.log");
 const STATUS = path.join(DIR, "status.json");
 const WRITELOG = path.join(DIR, "write-log.txt");
-const AGENT_VERSION = "0.10.0";
+const AGENT_VERSION = "0.11.0";
 
 function log(msg) {
   const line = `[${new Date().toISOString()}] ${msg}\n`;
@@ -642,6 +642,42 @@ async function toolEgoFinish() {
   return JSON.stringify(r);
 }
 
+/* One ego runtime for a whole sequence: every other ego tool pays a
+ * fresh `ego-browser nodejs` spawn (seconds of fixed overhead), so a
+ * multi-step browse should ride a single script. Steps run in order
+ * and stop at the first failure; per-step snapshots are capped so the
+ * bundle stays lean. */
+async function toolEgoBatch(args) {
+  const space = args && args.space === "user" ? "user" : "can";
+  const steps = Array.isArray(args && args.steps) ? args.steps : [];
+  if (!steps.length) throw new Error("steps must be a non-empty array of {op, ...}");
+  if (steps.length > 12) throw new Error("at most 12 steps per can_ego_batch");
+  const OPS = new Set(["open", "snapshot", "click", "type", "wait"]);
+  for (const s of steps) {
+    if (!s || !OPS.has(String(s.op))) throw new Error("unsupported ego batch op: " + String(s && s.op));
+    if (s.op === "open" && !/^https?:\/\//i.test(String(s.url || ""))) throw new Error("open step needs an http(s) url");
+    if ((s.op === "click" || s.op === "type") && !String(s.target || "")) throw new Error(s.op + " step needs a target");
+  }
+  const script =
+    egoTaskSnippet(space) +
+    egoPageSnippet(space) +
+    `const steps = ${JSON.stringify(steps)};\n` +
+    "const results = [];\n" +
+    "for (let i = 0; i < steps.length; i++) {\n" +
+    "  const s = steps[i];\n" +
+    "  try {\n" +
+    '    if (s.op === "open") { await page.goto(String(s.url)); results.push({ step: i, op: s.op, ok: true, url: await page.url(), title: await page.title() }); }\n' +
+    '    else if (s.op === "snapshot") { const t = String(await page.snapshot()); results.push({ step: i, op: s.op, ok: true, url: await page.url(), snapshot: t.length > 6000 ? t.slice(0, 6000) : t, truncated: t.length > 6000 }); }\n' +
+    '    else if (s.op === "click") { await page.click(String(s.target), { label: "Can click" }); results.push({ step: i, op: s.op, ok: true, url: await page.url(), title: await page.title() }); }\n' +
+    '    else if (s.op === "type") { await page.fill(String(s.target), String(s.text ?? "")); results.push({ step: i, op: s.op, ok: true, url: await page.url() }); }\n' +
+    '    else if (s.op === "wait") { await new Promise((r) => setTimeout(r, Math.min(Math.max(Number(s.ms) || 500, 0), 10000))); results.push({ step: i, op: s.op, ok: true }); }\n' +
+    "  } catch (e) { results.push({ step: i, op: s.op, ok: false, error: String(e && e.message || e).slice(0, 300) }); break; }\n" +
+    "}\n" +
+    'console.log("CAN_RESULT " + JSON.stringify({ spaceId: task.spaceId, steps: results, completed: results.filter((x) => x.ok).length, total: steps.length }));\n';
+  const r = await runEgo(script, 115000);
+  return JSON.stringify(r);
+}
+
 /* ------------------------------------------------- desktop (UI automation) */
 /* Desktop layer: Can drives ANY app's window from the outside via the
  * Cua Driver, which runs INSIDE this agent as a private internal
@@ -1106,7 +1142,7 @@ const CONFIRM_DESKTOP = FENCE.confirmDesktop !== undefined ? FENCE.confirmDeskto
 const TRUST_WINDOW_MIN = Math.min(Math.max(Number(FENCE.trustWindowMin || 0), 0), 240);
 let trustUntil = 0;
 const DIALOG_TIMEOUT_S = Math.min(Math.max(Number(FENCE.dialogTimeoutS || 60), 10), 120);
-const SENSITIVE = new Set(["can_run_command", "can_ego_click", "can_ego_type", "can_desktop_click", "can_desktop_type", "can_desktop_key", "can_desktop_batch", "can_desktop_click_xy", "can_desktop_drag_xy"]);
+const SENSITIVE = new Set(["can_run_command", "can_ego_click", "can_ego_type", "can_ego_batch", "can_desktop_click", "can_desktop_type", "can_desktop_key", "can_desktop_batch", "can_desktop_click_xy", "can_desktop_drag_xy"]);
 const sensitiveHits = [];
 
 // --- Pixel fallback -----------------------------------------------------------
@@ -1423,6 +1459,49 @@ async function toolAuditLog(args) {
 }
 
 /* ------------------------------------------------------------ dispatch */
+/* Cross-tool batch: run a planned sequence of Can tools in ONE relay
+ * round trip instead of one model round trip per step. Each step goes
+ * through guardedExecute, so the fence, hard blocks and audit apply
+ * per step exactly as if the brain had called the tools one by one.
+ * Image-returning tools are excluded: their payloads belong in a
+ * standalone call where the viewer component can present them. */
+const BATCH_BLOCKED = new Set(["can_batch", "can_desktop_screenshot", "can_desktop_window_shot", "can_desktop_zoom"]);
+
+async function toolBatch(args) {
+  const steps = Array.isArray(args && args.steps) ? args.steps : [];
+  if (!steps.length) throw new Error("steps must be a non-empty array of {tool, args}");
+  if (steps.length > 10) throw new Error("at most 10 steps per can_batch");
+  const out = [];
+  for (let i = 0; i < steps.length; i++) {
+    const st = steps[i] || {};
+    const tool = String(st.tool || "");
+    if (!tool || BATCH_BLOCKED.has(tool)) {
+      out.push({ step: i, tool, ok: false, error: "tool not allowed in can_batch" });
+      break;
+    }
+    let res;
+    try {
+      res = await guardedExecute(tool, st.args || {});
+    } catch (e) {
+      out.push({ step: i, tool, ok: false, error: String(e && e.message || e).slice(0, 300) });
+      break;
+    }
+    let ok = true;
+    try {
+      const p = JSON.parse(res);
+      if (p && p.error) ok = false;
+    } catch (e) {}
+    let text = typeof res === "string" ? res : JSON.stringify(res);
+    let truncated = false;
+    if (text.length > 2000) { text = text.slice(0, 2000); truncated = true; }
+    const rec = { step: i, tool, ok, result: text };
+    if (truncated) rec.truncated = true;
+    out.push(rec);
+    if (!ok) break;
+  }
+  return JSON.stringify({ steps: out, completed: out.filter((x) => x.ok).length, total: steps.length });
+}
+
 async function execute(tool, args) {
   switch (tool) {
     case "can_status":
@@ -1456,6 +1535,8 @@ async function execute(tool, args) {
     case "can_ego_click": return toolEgoClick(args);
     case "can_ego_type": return toolEgoType(args);
     case "can_ego_finish": return toolEgoFinish();
+    case "can_ego_batch": return toolEgoBatch(args);
+    case "can_batch": return toolBatch(args);
     case "can_audit_log": return toolAuditLog(args);
     case "can_desktop_windows": return toolDesktopWindows(args);
     case "can_desktop_open_app": return toolDesktopOpenApp(args);
@@ -1494,6 +1575,15 @@ async function main() {
   // Heartbeat runs on its own timer so long jobs (ego) cannot starve it.
   setInterval(() => { heartbeat().catch(() => {}); }, 20000);
   heartbeat().catch(() => {});
+  // Pre-warm the desktop engine so the first desktop call of the day
+  // does not pay the spawn + handshake. Failures are non-fatal: the
+  // lazy path retries on first use.
+  if (!IS_WIN) {
+    try {
+      const p = cuaSpawn();
+      if (p && typeof p.catch === "function") p.catch(() => {});
+    } catch (e) {}
+  }
   for (;;) {
     try {
       await pollOnce();

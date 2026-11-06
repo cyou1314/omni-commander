@@ -1,4 +1,4 @@
-// can-helper — Can's own desktop engine (macOS), milestone 4.
+// Can — the desktop engine inside Can (macOS).
 //
 // Speaks the same stdio JSON-RPC dialect the Can agent already uses with
 // its internal desktop driver: newline-delimited JSON-RPC 2.0, an
@@ -23,7 +23,7 @@
 // milestone lands (see docs/SELFBUILT-HELPER.md).
 //
 // Build:  ./build.sh        (swiftc, Xcode Command Line Tools)
-// Run:    ./can-helper mcp  (the agent passes the "mcp" argument)
+// Run:    ./Can mcp  (the agent passes the "mcp" argument; it is ignored)
 
 import Foundation
 import CoreGraphics
@@ -31,7 +31,7 @@ import ApplicationServices
 import ImageIO
 import ScreenCaptureKit
 
-let HELPER_VERSION = "0.4.3"
+let HELPER_VERSION = "0.5.0"
 
 // ---------- tiny JSON helpers ----------
 
@@ -335,12 +335,12 @@ func getWindowState(id: Any, args: [String: Any]) {
     }
     if !AXIsProcessTrusted() {
         promptAccessOnce()
-        toolError(id: id, "can-helper: accessibility permission is not granted for this process "
+        toolError(id: id, "Can: accessibility permission is not granted for this process "
             + "(AXIsProcessTrusted=false); grant the helper in System Settings > "
             + "Privacy & Security > Accessibility, then retry"); return
     }
     guard let win = findAXWindow(pid: pid, windowId: wid) else {
-        toolError(id: id, "can-helper: no accessibility window found for pid \(pid), window_id \(wid)"); return
+        toolError(id: id, "Can: no accessibility window found for pid \(pid), window_id \(wid)"); return
     }
     // A fresh snapshot replaces any zoom context (same rule as the old
     // driver: zoom -> snapshot -> from_zoom click is an error).
@@ -406,11 +406,11 @@ func getWindowState(id: Any, args: [String: Any]) {
     var content: [[String: Any]] = [["type": "text", "text": treeText]]
 
     if let wantShot = args["include_screenshot"] as? Bool, wantShot {
-        if let img = captureWindowPNG(windowId: wid) {
+        if let img = captureWindowJPEG(windowId: wid) {
             sc["screenshot_width"] = img.width
             sc["screenshot_height"] = img.height
-            sc["screenshot_mime_type"] = "image/png"
-            content.append(["type": "image", "data": img.b64, "mimeType": "image/png"])
+            sc["screenshot_mime_type"] = "image/jpeg"
+            content.append(["type": "image", "data": img.b64, "mimeType": "image/jpeg"])
         } else {
             sc["screenshot_error"] = "window capture failed (screen recording permission for this process?)"
         }
@@ -454,27 +454,27 @@ func captureWindowCGImage(windowId: Int) -> CGImage? {
     return result
 }
 
-func captureWindowPNG(windowId: Int) -> (b64: String, width: Int, height: Int)? {
+func captureWindowJPEG(windowId: Int) -> (b64: String, width: Int, height: Int)? {
     guard let cg = captureWindowCGImage(windowId: windowId),
-          let data = pngData(of: cg) else { return nil }
+          let data = jpegData(of: cg) else { return nil }
     return (data.base64EncodedString(), cg.width, cg.height)
 }
 
 func clickElement(id: Any, args: [String: Any]) {
     if let token = args["element_token"] as? String, !token.isEmpty {
         guard let el = tokenRegistry[token] else {
-            toolError(id: id, "can-helper: unknown or stale element_token '\(token)'; take a fresh snapshot"); return
+            toolError(id: id, "Can: unknown or stale element_token '\(token)'; take a fresh snapshot"); return
         }
         let err = AXUIElementPerformAction(el, kAXPressAction as CFString)
         if err != .success {
-            toolError(id: id, "can-helper: AX press failed for token '\(token)' (AXError \(err.rawValue))"); return
+            toolError(id: id, "Can: AX press failed for token '\(token)' (AXError \(err.rawValue))"); return
         }
         toolResult(id: id, structured: [String: Any](), text: "{}")
         return
     }
     // No token: pixel click (milestone 4).
     guard let pt = pixelPoint(args: args, xKey: "x", yKey: "y") else {
-        toolError(id: id, pixelError ?? "can-helper: click needs an element_token or x/y"); return
+        toolError(id: id, pixelError ?? "Can: click needs an element_token or x/y"); return
     }
     mouseClick(pid: pt.pid, point: pt.point)
     toolResult(id: id, structured: [String: Any](), text: "{}")
@@ -520,17 +520,17 @@ func pixelPoint(args: [String: Any], xKey: String, yKey: String) -> (pid: Int, p
     let y = doubleArg(args, yKey)
     if (args["from_zoom"] as? Bool) == true {
         guard let z = zoomCtx else {
-            pixelError = "can-helper: zoom context missing or replaced by a newer snapshot; call zoom again"
+            pixelError = "Can: zoom context missing or replaced by a newer snapshot; call zoom again"
             return nil
         }
         let pid = intArg(args, "pid")
         let wid = intArg(args, "window_id")
         if (pid != 0 && pid != z.pid) || (wid != 0 && wid != z.wid) {
-            pixelError = "can-helper: from_zoom target does not match the zoomed window"
+            pixelError = "Can: from_zoom target does not match the zoomed window"
             return nil
         }
         guard let frame = cgWindowFrame(windowId: z.wid) else {
-            pixelError = "can-helper: zoomed window is gone"
+            pixelError = "Can: zoomed window is gone"
             return nil
         }
         let wx = z.x1 + x * (z.x2 - z.x1) / Double(max(z.imgW, 1))
@@ -539,7 +539,7 @@ func pixelPoint(args: [String: Any], xKey: String, yKey: String) -> (pid: Int, p
     }
     if (args["scope"] as? String) == "desktop" {
         if let cid = args["capture_id"] as? String, cid != lastDesktopCaptureId {
-            pixelError = "can-helper: stale capture_id '\(cid)'; take a fresh desktop state"
+            pixelError = "Can: stale capture_id '\(cid)'; take a fresh desktop state"
             return nil
         }
         return (0, CGPoint(x: x, y: y))
@@ -547,11 +547,11 @@ func pixelPoint(args: [String: Any], xKey: String, yKey: String) -> (pid: Int, p
     let pid = intArg(args, "pid")
     let wid = intArg(args, "window_id")
     if wid == 0 {
-        pixelError = "can-helper: pixel click needs pid and window_id (or scope=desktop)"
+        pixelError = "Can: pixel click needs pid and window_id (or scope=desktop)"
         return nil
     }
     guard let frame = cgWindowFrame(windowId: wid) else {
-        pixelError = "can-helper: window \(wid) not found"
+        pixelError = "Can: window \(wid) not found"
         return nil
     }
     return (pid, CGPoint(x: frame.origin.x + x, y: frame.origin.y + y))
@@ -579,10 +579,10 @@ func mouseClick(pid: Int, point: CGPoint) {
 
 func dragTool(id: Any, args: [String: Any]) {
     guard let from = pixelPoint(args: args, xKey: "from_x", yKey: "from_y") else {
-        toolError(id: id, pixelError ?? "can-helper: drag needs from_x/from_y/to_x/to_y"); return
+        toolError(id: id, pixelError ?? "Can: drag needs from_x/from_y/to_x/to_y"); return
     }
     guard let to = pixelPoint(args: args, xKey: "to_x", yKey: "to_y") else {
-        toolError(id: id, pixelError ?? "can-helper: drag needs from_x/from_y/to_x/to_y"); return
+        toolError(id: id, pixelError ?? "Can: drag needs from_x/from_y/to_x/to_y"); return
     }
     let pid = from.pid != 0 ? from.pid : to.pid
     let duration = max(doubleArg(args, "duration_ms"), 50) / 1000.0
@@ -606,17 +606,17 @@ func dragTool(id: Any, args: [String: Any]) {
 func zoomTool(id: Any, args: [String: Any]) {
     let pid = intArg(args, "pid")
     let wid = intArg(args, "window_id")
-    if wid == 0 { toolError(id: id, "can-helper: zoom needs pid and window_id"); return }
+    if wid == 0 { toolError(id: id, "Can: zoom needs pid and window_id"); return }
     let x1 = doubleArg(args, "x1"), y1 = doubleArg(args, "y1")
     let x2 = doubleArg(args, "x2"), y2 = doubleArg(args, "y2")
     if x2 <= x1 || y2 <= y1 {
-        toolError(id: id, "can-helper: zoom needs a non-empty rect (x1<x2, y1<y2)"); return
+        toolError(id: id, "Can: zoom needs a non-empty rect (x1<x2, y1<y2)"); return
     }
     guard let frame = cgWindowFrame(windowId: wid) else {
-        toolError(id: id, "can-helper: window \(wid) not found"); return
+        toolError(id: id, "Can: window \(wid) not found"); return
     }
     guard let cg = captureWindowCGImage(windowId: wid) else {
-        toolError(id: id, "can-helper: zoom capture failed (screen recording permission for this process?)"); return
+        toolError(id: id, "Can: zoom capture failed (screen recording permission for this process?)"); return
     }
     // Capture px per window point (normally 1:1; stay exact regardless).
     let sx = Double(cg.width) / max(frame.width, 1)
@@ -625,24 +625,24 @@ func zoomTool(id: Any, args: [String: Any]) {
                       width: (x2 - x1) * sx, height: (y2 - y1) * sy)
         .intersection(CGRect(x: 0, y: 0, width: cg.width, height: cg.height))
     if rect.isNull || rect.width < 2 || rect.height < 2 {
-        toolError(id: id, "can-helper: zoom rect is outside the window"); return
+        toolError(id: id, "Can: zoom rect is outside the window"); return
     }
     guard let crop = cg.cropping(to: rect) else {
-        toolError(id: id, "can-helper: zoom crop failed"); return
+        toolError(id: id, "Can: zoom crop failed"); return
     }
     let out = scaled(crop, maxDim: 500)
-    guard let data = pngData(of: out) else {
-        toolError(id: id, "can-helper: zoom encode failed"); return
+    guard let data = jpegData(of: out) else {
+        toolError(id: id, "Can: zoom encode failed"); return
     }
     zoomCtx = ZoomCtx(pid: pid, wid: wid, x1: x1, y1: y1, x2: x2, y2: y2,
                       imgW: out.width, imgH: out.height)
     let sc: [String: Any] = [
         "screenshot_width": out.width,
         "screenshot_height": out.height,
-        "screenshot_mime_type": "image/png",
+        "screenshot_mime_type": "image/jpeg",
     ]
     send(["jsonrpc": "2.0", "id": id, "result": [
-        "content": [["type": "image", "data": data.base64EncodedString(), "mimeType": "image/png"]],
+        "content": [["type": "image", "data": data.base64EncodedString(), "mimeType": "image/jpeg"]],
         "structuredContent": sc,
         "isError": false,
     ]])
@@ -697,7 +697,7 @@ func typeText(id: Any, args: [String: Any]) {
     let pid = intArg(args, "pid")
     let text = (args["text"] as? String) ?? ""
     guard let el = tokenElement(args) else {
-        toolError(id: id, "can-helper: type_text needs a valid element_token from the latest snapshot"); return
+        toolError(id: id, "Can: type_text needs a valid element_token from the latest snapshot"); return
     }
     if !focusElement(el) {
         // Some fields report focus failure yet still receive keys when
@@ -705,7 +705,7 @@ func typeText(id: Any, args: [String: Any]) {
         // elements.
         let role = axString(el, kAXRoleAttribute as String)
         if !["AXTextField", "AXTextArea", "AXComboBox", "AXSearchField"].contains(role) {
-            toolError(id: id, "can-helper: element (role \(role)) cannot take keyboard focus"); return
+            toolError(id: id, "Can: element (role \(role)) cannot take keyboard focus"); return
         }
     }
     // Let the window actually become key before posting: events posted
@@ -721,16 +721,16 @@ func typeText(id: Any, args: [String: Any]) {
 func setValue(id: Any, args: [String: Any]) {
     let value = (args["value"] as? String) ?? ""
     guard let el = tokenElement(args) else {
-        toolError(id: id, "can-helper: set_value needs a valid element_token from the latest snapshot"); return
+        toolError(id: id, "Can: set_value needs a valid element_token from the latest snapshot"); return
     }
     var settable = DarwinBoolean(false)
     AXUIElementIsAttributeSettable(el, kAXValueAttribute as CFString, &settable)
     if !settable.boolValue {
-        toolError(id: id, "can-helper: element's value is not settable"); return
+        toolError(id: id, "Can: element's value is not settable"); return
     }
     let err = AXUIElementSetAttributeValue(el, kAXValueAttribute as CFString, value as CFString)
     if err != .success {
-        toolError(id: id, "can-helper: set_value failed (AXError \(err.rawValue))"); return
+        toolError(id: id, "Can: set_value failed (AXError \(err.rawValue))"); return
     }
     toolResult(id: id, structured: [String: Any](), text: "{}")
 }
@@ -759,11 +759,11 @@ let keyCodes: [String: CGKeyCode] = [
 func pressKey(id: Any, args: [String: Any]) {
     let pid = intArg(args, "pid")
     let raw = ((args["key"] as? String) ?? "").lowercased()
-    if raw.isEmpty { toolError(id: id, "can-helper: press_key needs a key"); return }
+    if raw.isEmpty { toolError(id: id, "Can: press_key needs a key"); return }
     if let el = tokenElement(args) { _ = focusElement(el); Thread.sleep(forTimeInterval: 0.08) }
     let parts = raw.split(separator: "+").map { $0.trimmingCharacters(in: .whitespaces) }
     guard let keyName = parts.last, let code = keyCodes[keyName] else {
-        toolError(id: id, "can-helper: unknown key '\(raw)'"); return
+        toolError(id: id, "Can: unknown key '\(raw)'"); return
     }
     // A bare printable character goes out as a unicode event: a raw
     // keycode event posted to another pid can be dropped when the
@@ -782,7 +782,7 @@ func pressKey(id: Any, args: [String: Any]) {
         case "option", "alt": flags.insert(.maskAlternate)
         case "ctrl", "control": flags.insert(.maskControl)
         case "fn": flags.insert(.maskSecondaryFn)
-        default: toolError(id: id, "can-helper: unknown modifier '\(mod)'"); return
+        default: toolError(id: id, "Can: unknown modifier '\(mod)'"); return
         }
     }
     postKeyEvent(pid: pid, keyCode: code, down: true, flags: flags)
@@ -795,11 +795,16 @@ func pressKey(id: Any, args: [String: Any]) {
 
 var captureSeq = 0
 
-func pngData(of cg: CGImage) -> Data? {
+// Captures are encoded as JPEG (quality 0.62) right here: a full-screen
+// PNG runs to several MB of base64 over stdio and the agent then had to
+// re-encode it with sips on every shot. Same picture, a fraction of the
+// bytes, one encode total.
+func jpegData(of cg: CGImage) -> Data? {
     let data = NSMutableData()
-    guard let dest = CGImageDestinationCreateWithData(data, "public.png" as CFString, 1, nil)
+    guard let dest = CGImageDestinationCreateWithData(data, "public.jpeg" as CFString, 1, nil)
     else { return nil }
-    CGImageDestinationAddImage(dest, cg, nil)
+    CGImageDestinationAddImage(dest, cg,
+        [kCGImageDestinationLossyCompressionQuality: 0.62] as CFDictionary)
     return CGImageDestinationFinalize(dest) ? (data as Data) : nil
 }
 
@@ -837,7 +842,7 @@ func captureDesktop(maxDim: Int) -> (b64: String, width: Int, height: Int)? {
             let cg = try await SCScreenshotManager.captureImage(
                 contentFilter: filter, configuration: cfg)
             let img = scaled(cg, maxDim: maxDim)
-            if let data = pngData(of: img) {
+            if let data = jpegData(of: img) {
                 result = (data.base64EncodedString(), img.width, img.height)
             }
         } catch {
@@ -851,7 +856,7 @@ func captureDesktop(maxDim: Int) -> (b64: String, width: Int, height: Int)? {
 func getDesktopState(id: Any, args: [String: Any]) {
     let maxDim = intArg(args, "max_image_dimension")
     guard let shot = captureDesktop(maxDim: maxDim) else {
-        toolError(id: id, "can-helper: desktop capture failed (screen recording permission for this process?)"); return
+        toolError(id: id, "Can: desktop capture failed (screen recording permission for this process?)"); return
     }
     captureSeq += 1
     lastDesktopCaptureId = "cap-\(captureSeq)"
@@ -867,11 +872,11 @@ func getDesktopState(id: Any, args: [String: Any]) {
         "screenshot_height": shot.height,
         "screen_width": screenW,
         "screen_height": screenH,
-        "screenshot_mime_type": "image/png",
+        "screenshot_mime_type": "image/jpeg",
         "capture_id": lastDesktopCaptureId ?? "cap-\(captureSeq)",
     ]
     send(["jsonrpc": "2.0", "id": id, "result": [
-        "content": [["type": "image", "data": shot.b64, "mimeType": "image/png"]],
+        "content": [["type": "image", "data": shot.b64, "mimeType": "image/jpeg"]],
         "structuredContent": sc,
         "isError": false,
     ]])
@@ -909,7 +914,7 @@ func handleToolsCall(id: Any, params: [String: Any]) {
     case "zoom":
         zoomTool(id: id, args: args)
     default:
-        toolError(id: id, "can-helper milestone 4: tool '\(name)' is not implemented yet")
+        toolError(id: id, "Can: tool '\(name)' is not implemented yet")
     }
 }
 
@@ -923,7 +928,7 @@ func handle(line: String) {
         send(["jsonrpc": "2.0", "id": id, "result": [
             "protocolVersion": "2024-11-05",
             "capabilities": ["tools": [String: Any]()],
-            "serverInfo": ["name": "can-helper", "version": HELPER_VERSION],
+            "serverInfo": ["name": "Can", "version": HELPER_VERSION],
         ]])
     case "tools/call":
         handleToolsCall(id: id, params: (obj["params"] as? [String: Any]) ?? [:])
