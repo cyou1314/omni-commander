@@ -1,4 +1,4 @@
-// can-helper — Can's own desktop engine (macOS), milestone 1.
+// can-helper — Can's own desktop engine (macOS), milestone 2.
 //
 // Speaks the same stdio JSON-RPC dialect the Can agent already uses with
 // its internal desktop driver: newline-delimited JSON-RPC 2.0, an
@@ -7,17 +7,21 @@
 // The agent spawns it as `<helper> mcp`; only its configured driver path
 // changes, nothing else.
 //
-// Milestone 1 scope: initialize, start_session (no-op), list_windows,
-// launch_app. Everything else answers with an honest isError until its
-// milestone lands (see docs/SELFBUILT-HELPER.md).
+// Milestone 1: initialize, start_session (no-op), list_windows, launch_app.
+// Milestone 2: get_window_state (AX tree walk -> elements + tokens +
+// markdown tree text, optional window screenshot) and click by
+// element_token (AX press). Remaining verbs answer with an honest
+// isError until their milestone lands (see docs/SELFBUILT-HELPER.md).
 //
 // Build:  ./build.sh        (swiftc, Xcode Command Line Tools)
 // Run:    ./can-helper mcp  (the agent passes the "mcp" argument)
 
 import Foundation
 import CoreGraphics
+import ApplicationServices
+import ImageIO
 
-let HELPER_VERSION = "0.1.0"
+let HELPER_VERSION = "0.2.0"
 
 // ---------- tiny JSON helpers ----------
 
@@ -44,7 +48,13 @@ func toolError(id: Any, _ message: String) {
     toolResult(id: id, structured: nil, text: message, isError: true)
 }
 
-// ---------- verbs ----------
+func intArg(_ args: [String: Any], _ key: String) -> Int {
+    if let n = args[key] as? NSNumber { return n.intValue }
+    if let s = args[key] as? String, let v = Int(s) { return v }
+    return 0
+}
+
+// ---------- list_windows / launch_app (milestone 1) ----------
 
 func listWindows() -> [[String: Any]] {
     let opts: CGWindowListOption = [.optionAll]
@@ -80,6 +90,16 @@ func listWindows() -> [[String: Any]] {
     return out
 }
 
+func windowBounds(windowId: Int) -> CGRect? {
+    for w in listWindows() where (w["window_id"] as? Int) == windowId {
+        if let b = w["bounds"] as? [String: Any] {
+            return CGRect(x: (b["x"] as? Double) ?? 0, y: (b["y"] as? Double) ?? 0,
+                          width: (b["width"] as? Double) ?? 0, height: (b["height"] as? Double) ?? 0)
+        }
+    }
+    return nil
+}
+
 func launchApp(args: [String: Any]) -> (ok: Bool, message: String) {
     let name = (args["app_name"] as? String) ?? (args["app"] as? String)
         ?? (args["name"] as? String) ?? ""
@@ -111,6 +131,215 @@ func launchApp(args: [String: Any]) -> (ok: Bool, message: String) {
     return (true, jsonString(["launched": true, "app": name, "windows": wins]))
 }
 
+// ---------- accessibility helpers (milestone 2) ----------
+
+func axAttr(_ el: AXUIElement, _ attr: String) -> AnyObject? {
+    var v: AnyObject?
+    return AXUIElementCopyAttributeValue(el, attr as CFString, &v) == .success ? v : nil
+}
+
+func axString(_ el: AXUIElement, _ attr: String) -> String {
+    (axAttr(el, attr) as? String) ?? ""
+}
+
+func axValueString(_ el: AXUIElement) -> String {
+    guard let v = axAttr(el, kAXValueAttribute as String) else { return "" }
+    if let s = v as? String { return s }
+    if let n = v as? NSNumber { return n.stringValue }
+    if let b = v as? Bool { return b ? "true" : "false" }
+    return ""
+}
+
+func axChildren(_ el: AXUIElement) -> [AXUIElement] {
+    (axAttr(el, kAXChildrenAttribute as String) as? [AXUIElement]) ?? []
+}
+
+func axPoint(_ el: AXUIElement, _ attr: String) -> CGPoint? {
+    guard let v = axAttr(el, attr), CFGetTypeID(v) == AXValueGetTypeID() else { return nil }
+    var p = CGPoint.zero
+    return AXValueGetValue(v as! AXValue, .cgPoint, &p) ? p : nil
+}
+
+func axSize(_ el: AXUIElement, _ attr: String) -> CGSize? {
+    guard let v = axAttr(el, attr), CFGetTypeID(v) == AXValueGetTypeID() else { return nil }
+    var s = CGSize.zero
+    return AXValueGetValue(v as! AXValue, .cgSize, &s) ? s : nil
+}
+
+// Find the AX window element for (pid, cgWindowId) by matching the AX
+// window's frame against the CG window's bounds; fall back to the app's
+// only / main window when the match is ambiguous.
+func findAXWindow(pid: Int, windowId: Int) -> AXUIElement? {
+    let app = AXUIElementCreateApplication(pid_t(pid))
+    let wins = (axAttr(app, kAXWindowsAttribute as String) as? [AXUIElement]) ?? []
+    if wins.isEmpty { return nil }
+    if let target = windowBounds(windowId: windowId) {
+        for w in wins {
+            guard let pos = axPoint(w, kAXPositionAttribute as String),
+                  let size = axSize(w, kAXSizeAttribute as String) else { continue }
+            if abs(pos.x - target.origin.x) <= 2 && abs(pos.y - target.origin.y) <= 2
+                && abs(size.width - target.size.width) <= 2 && abs(size.height - target.size.height) <= 2 {
+                return w
+            }
+        }
+    }
+    if wins.count == 1 { return wins[0] }
+    for w in wins {
+        if let main = axAttr(w, kAXMainAttribute as String) as? Bool, main { return w }
+    }
+    return wins[0]
+}
+
+// ---------- snapshots & tokens ----------
+
+var snapshotSeq = 0
+var tokenRegistry: [String: AXUIElement] = [:]
+var windowTokens: [String: [String]] = [:] // "pid:wid" -> tokens of the latest snapshot
+
+let interactiveRoles: Set<String> = [
+    "AXButton", "AXTextField", "AXTextArea", "AXCheckBox", "AXRadioButton",
+    "AXPopUpButton", "AXMenuButton", "AXMenuItem", "AXMenuBarItem", "AXLink",
+    "AXSlider", "AXIncrementor", "AXStepper", "AXTab", "AXTabButton",
+    "AXDisclosureTriangle", "AXColorWell", "AXSegmentedControl",
+]
+
+struct Walked {
+    let el: AXUIElement
+    let depth: Int
+    let role: String
+    let label: String
+    let value: String
+}
+
+func walkTree(root: AXUIElement, maxNodes: Int, maxDepth: Int) -> (nodes: [Walked], truncated: Bool) {
+    var out: [Walked] = []
+    var truncated = false
+    func label(of el: AXUIElement) -> String {
+        let t = axString(el, kAXTitleAttribute as String)
+        if !t.isEmpty { return t }
+        let d = axString(el, kAXDescriptionAttribute as String)
+        if !d.isEmpty { return d }
+        return axString(el, kAXHelpAttribute as String)
+    }
+    func visit(_ el: AXUIElement, _ depth: Int) {
+        if out.count >= maxNodes { truncated = true; return }
+        let role = axString(el, kAXRoleAttribute as String)
+        out.append(Walked(el: el, depth: depth, role: role,
+                          label: label(of: el), value: axValueString(el)))
+        if depth >= maxDepth { return }
+        for child in axChildren(el) { visit(child, depth + 1) }
+    }
+    visit(root, 0)
+    return (out, truncated)
+}
+
+func getWindowState(id: Any, args: [String: Any]) {
+    let pid = intArg(args, "pid")
+    let wid = intArg(args, "window_id")
+    if pid == 0 || wid == 0 {
+        toolError(id, "get_window_state needs pid and window_id"); return
+    }
+    if !AXIsProcessTrusted() {
+        toolError(id, "can-helper: accessibility permission is not granted for this process "
+            + "(AXIsProcessTrusted=false); grant the helper in System Settings > "
+            + "Privacy & Security > Accessibility, then retry"); return
+    }
+    guard let win = findAXWindow(pid: pid, windowId: wid) else {
+        toolError(id, "can-helper: no accessibility window found for pid \(pid), window_id \(wid)"); return
+    }
+
+    let (nodes, walkTruncated) = walkTree(root: win, maxNodes: 3000, maxDepth: 60)
+
+    // Element list: interactive roles, or anything carrying a label/value
+    // the model might reference. Tokens point back into the registry.
+    snapshotSeq += 1
+    let snapId = "s\(snapshotSeq)"
+    let key = "\(pid):\(wid)"
+    if let old = windowTokens[key] { for t in old { tokenRegistry.removeValue(forKey: t) } }
+    var tokens: [String] = []
+    var elements: [[String: Any]] = []
+    var elTruncated = false
+    for n in nodes {
+        let interesting = interactiveRoles.contains(n.role) || !n.label.isEmpty || !n.value.isEmpty
+        if !interesting { continue }
+        if elements.count >= 500 { elTruncated = true; break }
+        let idx = elements.count
+        let token = "\(snapId):\(idx)"
+        tokenRegistry[token] = n.el
+        tokens.append(token)
+        elements.append([
+            "element_index": idx,
+            "element_token": token,
+            "role": n.role,
+            "label": n.label,
+            "value": n.value,
+        ])
+    }
+    windowTokens[key] = tokens
+
+    // Markdown-ish tree text: every walked node, one line each. The agent
+    // passes this through to the model verbatim (trimmed), and some apps
+    // expose readouts only here (e.g. the Calculator display value).
+    var treeLines: [String] = []
+    for n in nodes.prefix(800) {
+        var line = String(repeating: "  ", count: min(n.depth, 12)) + (n.role.isEmpty ? "AXElement" : n.role)
+        if !n.label.isEmpty { line += " \"\(n.label)\"" }
+        if !n.value.isEmpty { line += " = \(n.value)" }
+        treeLines.append(line)
+    }
+    let treeText = treeLines.joined(separator: "\n")
+
+    var sc: [String: Any] = [
+        "elements": elements,
+        "truncated": walkTruncated || elTruncated,
+        "ax_trusted": true,
+    ]
+
+    var content: [[String: Any]] = [["type": "text", "text": treeText]]
+
+    if let wantShot = args["include_screenshot"] as? Bool, wantShot {
+        if let img = captureWindowPNG(windowId: wid) {
+            sc["screenshot_width"] = img.width
+            sc["screenshot_height"] = img.height
+            sc["screenshot_mime_type"] = "image/png"
+            content.append(["type": "image", "data": img.b64, "mimeType": "image/png"])
+        } else {
+            sc["screenshot_error"] = "window capture failed (screen recording permission for this process?)"
+        }
+    }
+
+    send(["jsonrpc": "2.0", "id": id, "result": [
+        "content": content,
+        "structuredContent": sc,
+        "isError": false,
+    ]])
+}
+
+func captureWindowPNG(windowId: Int) -> (b64: String, width: Int, height: Int)? {
+    guard let cg = CGWindowListCreateImage(.null, .optionFromWindow,
+                                           CGWindowID(windowId), [.bestResolution]) else { return nil }
+    let data = NSMutableData()
+    guard let dest = CGImageDestinationCreateWithData(data, "public.png" as CFString, 1, nil) else { return nil }
+    CGImageDestinationAddImage(dest, cg, nil)
+    if !CGImageDestinationFinalize(dest) { return nil }
+    return (data.base64EncodedString(), cg.width, cg.height)
+}
+
+func clickElement(id: Any, args: [String: Any]) {
+    guard let token = args["element_token"] as? String, !token.isEmpty else {
+        toolError(id, "can-helper milestone 2: click needs an element_token "
+            + "(pixel coordinate clicks land in milestone 4)"); return
+    }
+    guard let el = tokenRegistry[token] else {
+        toolError(id, "can-helper: unknown or stale element_token '\(token)'; take a fresh snapshot"); return
+    }
+    let err = AXUIElementPerformAction(el, kAXPressAction as CFString)
+    if err != .success {
+        toolError(id, "can-helper: AX press failed for token '\(token)' (AXError \(err.rawValue))"); return
+    }
+    toolResult(id: id, structured: [String: Any](), text: "{}")
+}
+
 // ---------- dispatch ----------
 
 func handleToolsCall(id: Any, params: [String: Any]) {
@@ -126,8 +355,12 @@ func handleToolsCall(id: Any, params: [String: Any]) {
         let r = launchApp(args: args)
         if r.ok { toolResult(id: id, structured: nil, text: r.message) }
         else { toolError(id: id, r.message) }
+    case "get_window_state":
+        getWindowState(id: id, args: args)
+    case "click":
+        clickElement(id: id, args: args)
     default:
-        toolError(id: id, "can-helper milestone 1: tool '\(name)' is not implemented yet")
+        toolError(id: id, "can-helper milestone 2: tool '\(name)' is not implemented yet")
     }
 }
 
@@ -157,8 +390,8 @@ func handle(line: String) {
 
 // ---------- main ----------
 
-// NSWorkspace / CGWindowList calls want a run-loop-friendly process; a
-// plain stdin line loop is enough for the request/response pattern here.
+// The plain stdin line loop is enough for the agent's request/response
+// pattern; AX calls are synchronous and same-process.
 while let line = readLine(strippingNewline: true) {
     if line.trimmingCharacters(in: .whitespaces).isEmpty { continue }
     handle(line: line)

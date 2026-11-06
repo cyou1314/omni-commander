@@ -34,5 +34,8 @@ freshly built helper suddenly sees no titles, re-toggle its entry there.
 
 ## Status
 
-Milestone 1: `initialize`, `start_session`, `list_windows`, `launch_app`.
+Milestone 1 (verified on the owner's Mac, 2026-11-06): `initialize`,
+`start_session`, `list_windows`, `launch_app`.
+Milestone 2: `get_window_state` (elements + tokens + tree text + optional
+window screenshot) and `click` by element token.
 Later verbs answer with an explicit "not implemented yet" error.

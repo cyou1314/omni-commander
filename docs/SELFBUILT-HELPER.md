@@ -52,8 +52,9 @@ Semantics the agent relies on (must be preserved):
 
 ## Milestones
 
-1. Skeleton: stdio JSON-RPC, `initialize`, `start_session`, `list_windows`,
-   `launch_app`.
+1. ✅ Skeleton: stdio JSON-RPC, `initialize`, `start_session`, `list_windows`,
+   `launch_app`. (Verified on the owner's Mac 2026-11-06: swiftc 6.4,
+   handshake + 30 windows returned.)
 2. `get_window_state` (elements + tokens + tree text + screenshot) and
    token `click`.
 3. `type_text` / `set_value` / `press_key`, `get_desktop_state`.
