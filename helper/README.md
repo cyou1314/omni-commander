@@ -46,4 +46,12 @@ Milestone 3: `type_text`, `set_value`, `press_key`, `get_desktop_state`
 Milestone 4: pixel `click` / `drag` / `zoom` in window, desktop and
 from_zoom spaces, and a window-relative `frame` on every element — see
 `smoke_m4.py`. Verified on the owner's Mac 2026-11-06 (helper 0.4.1).
+Milestone 5 (swap-in, verified on the owner's Mac 2026-11-06, helper
+0.4.3 deployed as `/Users/cyou/can-agent/Can`): the agent's `cuaPath`
+points at the helper and the full battery passed through the real
+agent chain (structure, batch, screenshot, pixels, Notes). TCC note:
+under the agent, the helper's effective TCC identity is the agent's
+`node` runtime (its responsible process) — the Accessibility and
+Screen Recording grants must be on for `node`; see
+`docs/SELFBUILT-HELPER.md`.
 Later verbs answer with an explicit "not implemented yet" error.

@@ -78,10 +78,28 @@ Semantics the agent relies on (must be preserved):
    ignored by many apps; keyboard is the opposite), and the macOS 27
    Calculator window exposes no drag region, so the drag check uses a
    standard title bar — the mechanism is the same.)
-5. Swap-in acceptance: point the agent's `cuaPath` at the helper and run
+5. ✅ Swap-in acceptance: point the agent's `cuaPath` at the helper and run
    the full battery — calculator structural (42 / 60), batch, pixel
    (7 → zoom → 8 = 78), Notes read — with Cua still installed as the
    fallback (swap back by config only).
+   (Verified on the owner's Mac 2026-11-06, helper 0.4.3 deployed as
+   `/Users/cyou/can-agent/Can`: open_app by English and Chinese names,
+   snapshot with readout, batch 6×7=42 re-read from a fresh snapshot,
+   full-screen ScreenCaptureKit shot, window shot 230×408 → pixel click
+   7 → zoom crop → from_zoom click 8 → readout 78, Notes listing read
+   back (8 notes). One TCC lesson, learned the hard way: under the
+   launchd agent the helper's *effective* TCC identity is its
+   responsible process — the agent's `node` runtime — so the
+   Accessibility and Screen Recording grants must be ON for `node` in
+   System Settings; an entry for the helper binary itself (added via
+   the file picker as "Can") does not take effect for the agent chain.
+   Grants only bind after the agent restarts. The helper asks politely
+   itself since 0.4.3 (`AXIsProcessTrustedWithOptions` prompt +
+   `CGRequestScreenCaptureAccess`, plus a `Can authorize` CLI mode),
+   which is what registered `node` in both lists. The product-grade
+   fix — bundle agent + helper into Can.app so the responsible process
+   *is* "Can" — is a later step; today's wiring depends on the `node`
+   toggles staying on.)
 
 Windows parity is a separate later step (UIA); the macOS helper ships
 first because that is the machine Can runs on today.
