@@ -1,5 +1,12 @@
 # Self-built desktop helper (replacing Cua Driver)
 
+> **Current state:** all five milestones below are done, and the closing
+> section — "Integration: Can.app bundle identity + helper 0.5.1" — describes
+> how the system runs today (it supersedes the TCC notes in milestone 5:
+> grants now belong to the Can.app bundle, not to `node`). Cua Driver was
+> uninstalled from the owner's Mac on 2026-11-06; there is no Cua fallback
+> anymore. Read the milestones as the build log, the last section as fact.
+
 Goal: replace the internal Cua Driver engine with our own helper binary, so
 the desktop layer is Can's own code end to end. The agent keeps spawning it
 exactly the same way (`<helper> mcp`, stdio JSON-RPC); only `cuaPath`

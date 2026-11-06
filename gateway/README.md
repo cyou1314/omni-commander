@@ -1,3 +1,8 @@
+> **注（2026-11-06）**：本文写于网关刚起步的 Step 1 阶段，当时只有
+> `can_status` / `can_write_note` 两个工具。现行网关是同一份 `gateway.py`，
+> 已长到 33 个工具；部署与使用以 [../docs/TUTORIAL.md](../docs/TUTORIAL.md) 为准。
+> 下面关于 `.env` 变量、端点与运行时文件的说明仍然准确。
+
 # Can gateway
 
 The cloud half of Can (omni-commander V2): a remote MCP server with

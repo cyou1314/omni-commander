@@ -1,3 +1,10 @@
+> **注（2026-11-06）**：本文写于 agent 刚站起来的 Step 2 阶段，下面的安装一节
+> 是最初的简版装法（launchd 直接拉 Node）。现行装法让 launchd 拉起 **Can.app
+> 里的守护进程**（`app/supervisor.swift`），再由守护进程拉起 Node——这样 macOS
+> 的两项隐私权限都记在「Can」名下。**安装与权限步骤以
+> [../docs/TUTORIAL.md](../docs/TUTORIAL.md) 第 2 步为准**；工具早已不止文中
+> 两个（现有 33 个，见教程附录 A）。
+
 # Can agent (Mac)
 
 The local half of Can (omni-commander V2, Step 2): a zero-dependency

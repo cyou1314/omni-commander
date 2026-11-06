@@ -1,106 +1,121 @@
-# omni-commander
+# Can
 
-**One tool stack for your computer. Any AI brain can drive it.**
+**在网页上跟 AI 说话，AI 就能连回你自己的电脑上干活。**
 
-omni-commander is not another agent and not another model. It is a curated,
-model-agnostic stack of existing MCP servers and skills that lets an AI
-assistant actually *do things* on your own machine:
+Can 是作者自用的一个小产品：一头是网页版 AI（比如 ChatGPT、Claude 的网页聊天），
+你在对话里交代事情；另一头是你电脑上常驻的一个小程序（agent），
+它把事情真做掉，再把结果传回对话里。中间是作者自己的网关，负责验明身份、转发任务。
 
-- read, write and search **files**
-- run **terminal** commands and processes
-- drive your **real, logged-in browser** (not a disposable empty one)
-- operate **desktop apps** in the background, without stealing your mouse
+你在任何一台设备上打开网页聊天，就能让家里/办公室那台电脑：
 
-The brain is interchangeable. Claude, GPT, Gemini, DeepSeek — any client that
-speaks [MCP](https://modelcontextprotocol.io) can use the exact same stack.
-You assemble the hands once; you swap brains whenever you like.
+- 读写文件、跑终端命令；
+- 开一个干净的浏览器查公开网页；
+- 用你日常浏览器（带着你的登录状态）办事；
+- 操作桌面软件——看窗口、点按钮、打字、截图。
 
-**And it is not tied to one computer or one OS.** The stack is a set of roles
-(file/terminal, browser, desktop), and every role has an implementation on
-each major desktop OS — see the platform matrix below. Your own machine is
-just the first test machine, not the target.
+名字和图标都是作者自己的（白色三角播放键，见 `assets/can-icon.png`），
+第三方组件只在内部干活，不露脸。
 
-## Platform support
+> **想装一遍或照着用？直接看详细教程：[docs/TUTORIAL.md](docs/TUTORIAL.md)**
 
-| Role | Windows | macOS | Linux |
-|------|---------|-------|-------|
-| Files / terminal — Desktop Commander MCP | ✅ | ✅ | ✅ |
-| Clean browser — Playwright MCP | ✅ | ✅ | ✅ |
-| Browser inspection — Chrome DevTools MCP (optional) | ✅ | ✅ | ✅ |
-| Desktop apps — Cua Driver | ✅ stable | ✅ stable | ⚠️ pre-release (X11 / XWayland, AT-SPI 2) |
-| Logged-in browser — ego | ⚠️ beta | ✅ | ❌ on vendor roadmap, no date |
-| Logged-in browser, fallback — agent-browser / Chrome DevTools MCP attached to your real Chrome | ✅ | ✅ | ✅ |
+## 它是怎么连起来的（三段）
 
-Honest gaps, by design:
+```
+网页版 AI ──HTTPS──▶ Can 网关 ──中继──▶ 你电脑上的 Can agent ──▶ 真干活
+ （大脑）           （验身份+转发）        （常驻小程序，只往外连）
+```
 
-- The **core stack (rows 1–4) runs on all three OSes today.** Nothing in the
-  router, the config format, or the workflows assumes a specific OS.
-- The **logged-in browser is the least portable layer.** ego is best on
-  macOS, beta on Windows, absent on Linux. That is why the router treats it
-  as a *role* ("logged-in browser driver"), not as a fixed product: on Linux
-  the fallback drivers above fill the same role.
-- Per-OS differences are quarantined into per-OS config files
-  (`config/mcp-servers.<os>.json`) and per-OS notes in the setup guide.
-  Everything above that layer — rules, routing, workflows — is shared.
+1. **网页大脑**：ChatGPT / Claude 等网页聊天，Can 在它们那里登记为一个「连接器」。
+   大脑只负责理解你说什么、决定调哪个工具，它碰不到你的电脑。
+2. **网关**（`gateway/`）：一个很小的云端服务。对外是一个带 OAuth 2.1 登录的
+   MCP 接口；对内把任务转给你的 agent。它只验身份和转发，**不存你电脑上的任何数据**。
+3. **本地 agent**（`agent/` + `app/`）：常驻在你电脑上的程序。它主动往外连网关
+   （电脑上不开任何入站端口），领到任务在本机执行，把结果送回去。
+   安全规则由它在本机强制执行，不听大脑的口头保证。
 
-## Why structured-first?
+## 四层能力（33 个工具）
 
-Most "computer use" demos fail the same way: the model stares at screenshots
-and guesses pixel coordinates. omni-commander routes every task down the most
-deterministic path that can do the job:
+| 层 | 干什么 | 工具前缀 |
+|----|--------|----------|
+| 文件与终端 | 在指定的工作文件夹里列/读/新建文件；跑终端命令（30 秒超时） | `can_list_files`、`can_read_file`、`can_write_file`、`can_run_command` 等 |
+| 干净 Chrome | 一个独立配置的浏览器，没有你的登录状态，适合查公开网页 | `can_browser_*` |
+| 日常浏览器（ego） | 你天天用的浏览器、带着你的登录，在专属任务空间里干活，不动你自己的标签页 | `can_ego_*` |
+| 桌面软件 | 看任意应用的窗口结构、按编号点/输/按键；结构看不见的地方用截图+坐标兜底 | `can_desktop_*` |
 
-| Priority | Layer | Tool | Why |
-|----------|-------|------|-----|
-| 1 | APIs / files / terminal | Desktop Commander MCP | Direct calls. Deterministic, no screen involved |
-| 2 | Browser, structured | ego (logged-in) · Playwright MCP (clean) | Accessibility / semantic tree, elements clicked by ref, not by coordinates |
-| 3 | Desktop apps, structured | Cua Driver MCP | Reads native apps' accessibility tree, works in the background, does not take over cursor or focus |
-| 4 | Pixel computer use (fallback only) | Your client's built-in computer use | Screenshots + coordinates. Most flexible, least reliable — last resort, short steps, verify every step |
+外加三个跨层工具：`can_status`（电脑在不在线）、`can_batch`（多种工具一次往返连做，最多 10 步）、
+`can_audit_log`（看本机审计日志）。完整速查表在教程附录里。
 
-Plus three rules baked into the router (`rules/ROUTER.md`):
+**桌面层是作者自研的引擎**（`helper/`，Swift 写的，只认 11 个动作），
+不是套壳别人的软件——所以系统权限列表里从头到尾只有「Can」一个名字。
 
-- **Verify every step.** After each action, re-read state before acting again. Never blind-chain clicks.
-- **Solidify what works.** A flow that succeeded once becomes a script in `workflows/`; next time the script runs, not the model's improvisation.
-- **Hand off the dangerous stuff.** CAPTCHAs, 2FA, payments, deletions and publishing stop and wait for the human.
+## 哪些 AI 能接（实测结论，2026-11-06）
 
-## Components (V1)
+| 入口 | 状态 |
+|------|------|
+| ChatGPT 网页版 | ✅ 已装通，日常在用（33 个工具全通） |
+| Claude 网页版 | ✅ 已装通（免费账号就能加自定义连接器；工具默认每次调用要你批准） |
+| 豆包网页版 | ❌「新建自定义连接器」是灰的，它提示去电脑版建 |
+| 豆包电脑版（Mac） | ⚠️ 能把 Can 建出来存好，但点「安装」被「本地电脑未初始化」挡住——它依赖的本地组件目前只有 Windows 版，Mac 上用不了 |
+| 其他支持 MCP 的客户端 | 理论上能接（Can 用的是标准 MCP + OAuth），没有逐个实测过 |
 
-| Component | Role | License / source |
-|-----------|------|------------------|
-| [Desktop Commander MCP](https://github.com/wonderwhy-er/DesktopCommanderMCP) | Files, terminal, processes | MIT, open source |
-| [ego (lite)](https://lite.ego.app) + ego-browser skill | Logged-in browser, isolated Spaces (macOS full, Windows beta; Linux: use the fallback drivers in the platform matrix) | Browser binary closed source, free; skill open |
-| [Playwright MCP](https://github.com/microsoft/playwright-mcp) (Microsoft) | Clean browser automation | Apache-2.0 |
-| [Cua Driver](https://github.com/trycua/cua) | Background desktop app control | MIT, early preview; Windows/macOS stable, Linux pre-release |
-| `rules/`, `workflows/`, `config/` in this repo | The router, guardrails and setup — the part we actually write | MIT (this repo) |
+## 安全设计
 
-Optional, add only when needed: Chrome DevTools MCP (browser debugging /
-network / performance inspection).
+- **只有机主能授权**：每接一个新的 AI 入口，都要打开 Can 自己的授权页、
+  输入机主码（只有你知道的一串码）才放行。没有码，谁也连不上你的电脑。
+- **硬拦截在本机**：`sudo`、`rm -rf`、关机重启、格式化磁盘这类灾难命令，
+  在 agent 里被名单直接拦死，大脑说破天也不执行。
+- **敏感动作可要求本机确认**：跑命令、在日常浏览器里点/输、操作桌面，
+  可以设置成「必须你在电脑前弹窗点允许才执行」，拒绝或超时一律不做。
+  （作者本人嫌烦，把确认全关了——新装的人建议先开着，见教程第 6 步。）
+- **全量审计**：每一次调用、每一次放行/拦截都写进电脑上的 `audit.log`，随时可查。
+- **停手边界**：验证码、二次验证、付款、删除、发布这类事，agent 不替你做，停下来等你本人。
+- **离线不撒谎**：电脑没开机或 agent 没连上时，网关如实回「离线」，绝不假装执行。
 
-## Quick start
+## 快速开始
 
-V1 is local-only, single user, and cross-platform (Windows / macOS / Linux).
-Follow the step-by-step guide — one step at a time, each with its own
-acceptance check:
+完整分步教程（每步带验收标准）：**[docs/TUTORIAL.md](docs/TUTORIAL.md)**
 
-➡️ **[docs/SETUP.md](docs/SETUP.md)**
+大致顺序是：
 
-Short version: Node ≥ 22.12 → copy the config file for your OS
-(`config/mcp-servers.windows.json` / `.macos.json` / `.linux.json`) into your
-MCP client → install components one by one → run the acceptance task for each
-layer → finish with one cross-layer task.
+1. 在一台小服务器上把网关跑起来（Python 单文件 + 一个公网 HTTPS 地址）；
+2. 在 Mac 上装 agent 并给两个系统权限（辅助功能、屏幕录制）；
+3. 在 ChatGPT / Claude 网页版里添加连接器，用机主码授权；
+4. 回到对话里说第一句话：「我的电脑在线吗？」
 
-## What V1 is not
+## 仓库结构
 
-- Not a remote service. No accounts, no cloud relay (that is a possible V2: a
-  tunnel + one token, nothing more).
-- Not a sandbox. These tools run with your user account's real permissions.
-  The guardrails in `rules/ROUTER.md` are guardrails, not a security boundary.
-  Read them before you run anything.
+| 目录 | 是什么 |
+|------|--------|
+| `gateway/` | 网关：单文件 `gateway.py`（OAuth 2.1 + MCP + 中继） |
+| `agent/` | 本地 agent：单文件 `agent.js`（零依赖 Node，Mac/Windows 同一份代码）+ 安装用的 plist / 示例配置 |
+| `app/` | Can.app 的守护进程源码（`supervisor.swift`）：负责拉起 agent，并让系统权限都记在「Can」名下 |
+| `helper/` | 自研桌面引擎源码（Swift）+ 冒烟测试脚本 |
+| `assets/` | 产品图标 |
+| `docs/` | 教程与设计文档（见下） |
+| `rules/`、`workflows/`、`config/` | **V1 遗留**：早期「本地大脑」路线的规则、工作流与配置，Can 不依赖它们，留作历史记录 |
 
-## Status
+## 文档
 
-V1 under construction, step by step. See [docs/SETUP.md](docs/SETUP.md) for the
-current step checklist.
+- **[docs/TUTORIAL.md](docs/TUTORIAL.md)** — 安装与使用教程（现行，以此为准）
+- [docs/SELFBUILT-HELPER.md](docs/SELFBUILT-HELPER.md) — 自研桌面引擎的设计与里程碑
+- [docs/WINDOWS.md](docs/WINDOWS.md) — Windows 版 agent 说明（代码已写，未真机验收）
+- [docs/V2-PLAN.md](docs/V2-PLAN.md) — 历史：V2 立项计划（2026-11-05）
+- [docs/SETUP.md](docs/SETUP.md) — 历史：V1 本地工具栈的安装记录
+
+## 现状与限制（说实话的部分）
+
+- **单人自用**：没有多用户、没有注册系统，就是作者一个人用。
+- **网关一次只中继一个 agent**：Mac 和 Windows 的 agent 不能同时在线，要换机器先停一个。
+- **Windows 版没真机验过**：agent 的 Windows 分支代码写完、离线测试过，
+  但还没在真的 Windows 电脑上跑过验收；自研桌面引擎目前只有 Mac 版（Swift），
+  Windows 的桌面层还没做。
+- **Node 运行时没打包**：Mac 上的 agent 借用你机器上已装的 Node 运行；
+  要给别人用，得先把这块补上。
+- **公网地址**：作者用的是 ngrok 的免费域名（够用、免费），
+  你也可以换成自己的域名 + 反向代理，网关不挑。
+- **截图在对话里的显示**靠各家 AI 的界面支持：ChatGPT 里能直接看图、点开全屏；
+  其他入口以它自己的渲染为准。
 
 ## License
 
-MIT — see [LICENSE](LICENSE). Third-party components keep their own licenses.
+MIT — 见 [LICENSE](LICENSE)。

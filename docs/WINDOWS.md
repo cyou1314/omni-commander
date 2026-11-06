@@ -1,5 +1,15 @@
 # Can on Windows
 
+> **Status note (2026-11-06):** the Windows agent described here is
+> code-complete and offline-tested, but **not yet verified on a real
+> Windows machine**. On macOS the desktop engine is no longer Cua Driver —
+> it was replaced by Can's own helper (`helper/`) and Cua Driver was
+> uninstalled from the test machine; the Windows desktop layer below still
+> describes the `cua-driver` wiring the code ships with, which is part of
+> what a real-machine verification would need to settle. For the current
+> product overview and tutorial see the root README and
+> [TUTORIAL.md](TUTORIAL.md).
+
 The Can agent is a single cross-platform `agent/agent.js` (Node, built-ins
 only). The same file runs on macOS and Windows; the OS-specific pieces are
 branched internally:
@@ -10,7 +20,7 @@ branched internally:
 | Screenshot PNG→JPEG | `sips` | PowerShell + System.Drawing |
 | Owner-confirmation dialog | AppleScript dialog | PowerShell WinForms dialog (same fail-closed timeout) |
 | Keep-alive | launchd `com.can.agent` | Scheduled Task "Can Agent" (logon trigger, restart on failure) |
-| Desktop engine | Cua Driver (`cua-driver mcp`) | Cua Driver (`cua-driver mcp`, UIA) |
+| Desktop engine | Can's own helper (`helper/`, spawned via `cuaPath`) | Cua Driver (`cua-driver mcp`, UIA) — as shipped in code, unverified |
 | Daily browser (ego) | ego lite via ego-browser CLI | **not available yet** (ego for Windows is beta) — the tools report this honestly |
 | Sandbox browser | Google Chrome via CDP | Google Chrome via CDP (standard install paths) |
 

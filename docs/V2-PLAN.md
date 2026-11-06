@@ -1,3 +1,7 @@
+> **历史文档**：本文是 2026-11-05 的 V2 立项计划，记录当时的设想与步骤划分。
+> 计划已基本落地（其 Step 6 的自研引擎替换也已完成），现状与 Can 的安装、使用
+> **请看 [TUTORIAL.md](TUTORIAL.md)** 与仓库根目录的 README。本文仅作历史留存。
+
 # Can — omni-commander V2 web edition plan
 
 Decided 2026-11-05. V1 (see `docs/SETUP.md`) proved the layers on one machine

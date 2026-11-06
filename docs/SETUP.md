@@ -1,3 +1,8 @@
+> **历史文档**：本文是 V1 阶段（本地大脑 + 第三方工具栈）的安装记录，
+> 产品已演进为 V2 的 **Can**（网页版 AI 经自有网关连回本地 agent）。
+> **Can 的安装与使用请看 [TUTORIAL.md](TUTORIAL.md)**，本文仅作历史留存，
+> 其中 Cua Driver 等内容已不适用于现行版本。
+
 # SETUP — step by step, one acceptance check per step
 
 Rules of the road:
