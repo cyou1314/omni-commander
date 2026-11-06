@@ -55,8 +55,13 @@ Semantics the agent relies on (must be preserved):
 1. ✅ Skeleton: stdio JSON-RPC, `initialize`, `start_session`, `list_windows`,
    `launch_app`. (Verified on the owner's Mac 2026-11-06: swiftc 6.4,
    handshake + 30 windows returned.)
-2. `get_window_state` (elements + tokens + tree text + screenshot) and
-   token `click`.
+2. ✅ `get_window_state` (elements + tokens + tree text + screenshot) and
+   token `click`. (Verified on the owner's Mac 2026-11-06 with
+   `helper/smoke_m2.py`: Calculator snapshot returned 29 elements and the
+   readout in the tree text; clicking the "7" button by token changed the
+   readout to 7; the ScreenCaptureKit window shot came back inline.
+   Note: screenshots use ScreenCaptureKit — `CGWindowListCreateImage`
+   is unavailable in current SDKs.)
 3. `type_text` / `set_value` / `press_key`, `get_desktop_state`.
 4. Pixel `click` / `drag` / `zoom` (+ `from_zoom`).
 5. Swap-in acceptance: point the agent's `cuaPath` at the helper and run
